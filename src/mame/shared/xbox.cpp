@@ -310,15 +310,15 @@ void xbox_base_state::threadlist_command(const std::vector<std::string_view> &pa
 	con.printf("-------------------------------\n");
 	for (int pri = 0; pri < 16; pri++)
 	{
-		uint32_t curr = debugc_bios->parameter[1 - 1] + pri * 8;
-		uint32_t addr = curr;
+		offs_t curr = debugc_bios->parameter[1 - 1] + pri * 8;
+		offs_t addr = curr;
 		if (!m_maincpu->translate(AS_PROGRAM, device_memory_interface::TR_READ, addr, tspace))
 			continue;
-		uint32_t next = tspace->read_dword_unaligned(addr);
+		offs_t next = tspace->read_dword_unaligned(addr);
 
 		while ((next != curr) && (next != 0))
 		{
-			uint32_t kthrd = next - debugc_bios->parameter[2 - 1];
+			offs_t kthrd = next - debugc_bios->parameter[2 - 1];
 			if (!m_maincpu->translate(AS_PROGRAM, device_memory_interface::TR_READ, kthrd, tspace))
 				break;
 			uint32_t topstack = tspace->read_dword_unaligned(kthrd + debugc_bios->parameter[3 - 1]);
@@ -993,7 +993,7 @@ void xbox_base_state::xbox_base(machine_config &config)
 	NV2A_GPU(config,        "pci:1e.0:00.0", m_maincpu).interrupt_handler().set("pci:01.0", FUNC(mcpx_isalpc_device::irq3)); //.set(FUNC(xbox_base_state::nv2a_interrupt_changed));
 
 	/* video hardware */
-	screen_device &screen(SCREEN(config, "screen", SCREEN_TYPE_RASTER));
+	screen_device &screen(SCREEN(config, "screen"));
 	screen.set_refresh_hz(60);
 	screen.set_vblank_time(ATTOSECONDS_IN_USEC(2500));  /* not accurate */
 	screen.set_size(640, 480);

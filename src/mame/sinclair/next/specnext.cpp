@@ -20,6 +20,7 @@
 
 #include "../screen_ula.h"
 #include "../spec128.h"
+#include "snapshot_nex.h"
 #include "specnext_copper.h"
 #include "specnext_ctc.h"
 #include "specnext_divmmc.h"
@@ -31,6 +32,7 @@
 #include "specnext_sprites.h"
 #include "specnext_tiles.h"
 #include "specnext_uart.h"
+#include "specnext_vtest.h"
 
 #include "bus/midi/midi.h"
 #include "bus/rs232/rs232.h"
@@ -144,6 +146,7 @@ public:
 		, m_layer2(*this, "layer2")
 		, m_lores(*this, "lores")
 		, m_sprites(*this, "sprites")
+		, m_vtest(*this, "vtest")
 		, m_io_video(*this, "VIDEO")
 		, m_io_layers(*this, "LYRS")
 		, m_io_mouse(*this, "mouse_input%u", 0U)
@@ -157,6 +160,7 @@ public:
 	void ks3(machine_config &config);
 
 	INPUT_CHANGED_MEMBER(on_nmi_button);
+	DECLARE_SNAPSHOT_LOAD_MEMBER(nex_snapshot_cb);
 
 protected:
 	virtual void machine_start() override ATTR_COLD;
@@ -218,7 +222,7 @@ private:
 
 	virtual TIMER_CALLBACK_MEMBER(irq_off) override;
 	virtual TIMER_CALLBACK_MEMBER(irq_on) override;
-	INTERRUPT_GEN_MEMBER(specnext_interrupt);
+	INTERRUPT_GEN_MEMBER(on_vblank);
 	TIMER_CALLBACK_MEMBER(line_irq_on);
 	INTERRUPT_GEN_MEMBER(line_interrupt);
 	TIMER_CALLBACK_MEMBER(spi_clock);
@@ -230,6 +234,8 @@ private:
 	bool machine_type_48() const { return m_nr_03_machine_type == 0 || m_nr_03_machine_type == 1; }
 	bool machine_type_128() const { return m_nr_03_machine_type == 2 || m_nr_03_machine_type == 4; }
 	bool machine_type_p3() const { return !machine_type_48() && !machine_type_128(); }
+	// 32 cycles for 48K/+3 timing, 36 for 128K/Pentagon
+	u8 irq_pulse_cycles() const { return (BIT(m_eff_nr_03_machine_timing, 2) || (BIT(m_eff_nr_03_machine_timing, 1) && !BIT(m_eff_nr_03_machine_timing, 0))) ? 36 : 32; }
 
 	bool nmi_assert_mf() { return ((m_io_nmi->read() & 1) || m_nr_02_generate_mf_nmi) && m_nr_06_button_m1_nmi_en; }
 	bool nmi_assert_divmmc() { return ((m_io_nmi->read() & 2) || m_nr_02_generate_divmmc_nmi) && m_nr_06_button_drive_nmi_en; }
@@ -388,8 +394,10 @@ private:
 	required_device<specnext_layer2_device> m_layer2;
 	required_device<specnext_lores_device> m_lores;
 	required_device<specnext_sprites_device> m_sprites;
+	required_device<specnext_vtest_device> m_vtest;
 	optional_ioport m_io_video;
 	optional_ioport m_io_layers;
+	bool m_video_test_pattern_active = false;
 	required_ioport_array<4> m_io_mouse;
 	required_ioport m_io_joy_left;
 	required_ioport m_io_joy_right;
@@ -634,6 +642,33 @@ private:
 	bool m_i2c_scl_data;
 	bool m_i2c_sda_data;
 };
+
+SNAPSHOT_LOAD_MEMBER(specnext_state::nex_snapshot_cb)
+{
+	nex_file::hooks h;
+	h.reg_w = [this](u8 reg, u8 data) { m_next_regs.write_byte(reg, data); };
+	h.reg_r = [this](u8 reg) { return m_next_regs.read_byte(reg); };
+	h.poke  = [this](u16 addr, u8 data) { m_program.write_byte(addr, data); };
+
+	nex_file::init_defaults(h);
+
+	if (image.is_filetype("nex"))
+	{
+		image.fseek(0, SEEK_SET);
+
+		nex_file nex;
+		nex_file::result r = nex.load(image, h);
+		if (!r.loaded)
+			return std::make_pair(image_error::INVALIDIMAGE, "Invalid .NEX file");
+
+		m_port_fe_data = (m_port_fe_data & 0xf8) | (r.border_color & 0x07);
+		m_maincpu->set_state_int(Z80_SP, r.sp);
+		m_maincpu->set_state_int(Z80_PC, r.pc);
+
+		return std::make_pair(std::error_condition(), std::string());
+	}
+	return spectrum_state::snapshot_cb(image);
+}
 
 void specnext_state::bank_update(u8 bank, u8 count)
 {
@@ -990,12 +1025,13 @@ void specnext_state::update_video_mode()
 	// The visarea can't overlap with screen last vpos. Possibly related to https://github.com/mamedev/mame/pull/9945
 	visarea.max_y = std::min(visarea.max_y, height - 2);
 
-	m_screen->configure(width, height, visarea, HZ_TO_ATTOSECONDS(28_MHz_XTAL / 2) * width * height);
+	m_screen->configure(width, height, visarea, attotime::from_ticks(width * height, 28_MHz_XTAL / 2));
 	m_ula_scr->set_raster_offset(left, top);
 	m_lores->set_raster_offset(left, top);
 	m_tiles->set_raster_offset(left, top);
 	m_layer2->set_raster_offset(left, top);
 	m_sprites->set_raster_offset(left, top);
+	m_vtest->set_raster_offset(left, top);
 
 	m_eff_nr_03_machine_timing = m_nr_03_machine_timing;
 	m_eff_nr_05_5060 = m_nr_05_5060;
@@ -1004,6 +1040,12 @@ void specnext_state::update_video_mode()
 
 u32 specnext_state::screen_update(screen_device &screen, bitmap_rgb32 &bitmap, const rectangle &cliprect)
 {
+	if (m_video_test_pattern_active)
+	{
+		m_vtest->draw(bitmap, cliprect);
+		return 0;
+	}
+
 	rectangle clip256x192 = m_clip256x192;
 	clip256x192 &= cliprect;
 	rectangle clip320x256 = m_clip320x256;
@@ -1170,6 +1212,8 @@ void specnext_state::ulatm_w(u8 data)
 
 void specnext_state::port_7ffd_reg_w(u8 data)
 {
+	if (BIT(m_port_7ffd_data ^ data, 3))
+		m_screen->update_now();
 	m_port_7ffd_data = data;
 	m_ula_scr->ula_shadow_en_w(port_7ffd_shadow());
 }
@@ -1247,7 +1291,10 @@ template <u8 Reg> u8 specnext_state::uart_reg_r()
 	if (!port_uart_io_en())
 		return 0x00;
 
-	return m_uart[m_uart_select]->reg_r(Reg);
+	if constexpr (Reg == 0b01)
+		return (m_uart_select << 6) | m_uart[m_uart_select]->reg_r(Reg);
+	else
+		return m_uart[m_uart_select]->reg_r(Reg);
 }
 
 template <u8 Reg> void specnext_state::uart_reg_w(u8 data)
@@ -2726,7 +2773,7 @@ TIMER_CALLBACK_MEMBER(specnext_state::irq_on)
 	LOGINTVVV("<ULA/Frame IRQ>\n");
 	m_im2_ula->irq_w(ASSERT_LINE);
 	if (m_nr_c0_int_mode_pulse_0_im2_1 == 0)
-		m_irq_off_timer->adjust(m_maincpu->clocks_to_attotime(32));
+		m_irq_off_timer->adjust(m_maincpu->clocks_to_attotime(irq_pulse_cycles()));
 }
 
 TIMER_CALLBACK_MEMBER(specnext_state::line_irq_on)
@@ -2735,12 +2782,13 @@ TIMER_CALLBACK_MEMBER(specnext_state::line_irq_on)
 	LOGINTVVV("<Line IRQ>\n");
 	m_im2_line->irq_w(ASSERT_LINE);
 	if (m_nr_c0_int_mode_pulse_0_im2_1 == 0)
-		m_irq_off_timer->adjust(m_maincpu->clocks_to_attotime(32));
+		m_irq_off_timer->adjust(m_maincpu->clocks_to_attotime(irq_pulse_cycles()));
 }
 
 void specnext_state::irq_w(int state)
 {
-	m_maincpu->set_input_line(INPUT_LINE_IRQ0, state);
+	if (!(m_nr_c0_int_mode_pulse_0_im2_1 == 0 && state == CLEAR_LINE && m_irq_off_timer->enabled()))
+		m_maincpu->set_input_line(INPUT_LINE_IRQ0, state);
 
 	const std::array<int, 10> states =
 	{
@@ -2784,7 +2832,7 @@ void specnext_state::irq_w(int state)
 	update_dma_delay();
 }
 
-INTERRUPT_GEN_MEMBER(specnext_state::specnext_interrupt)
+INTERRUPT_GEN_MEMBER(specnext_state::on_vblank)
 {
 	m_tiles->control_w(m_nr_6b_tm_control); // TODO (1): Santa's Pressie, The Next War
 
@@ -2794,6 +2842,8 @@ INTERRUPT_GEN_MEMBER(specnext_state::specnext_interrupt)
 		m_video_output_hdmi = tmp;
 		update_video_mode();
 	}
+
+	m_video_test_pattern_active = ((m_io_joy_left->read() & 0x700) == 0x700) || ((m_io_joy_right->read() & 0x700) == 0x700);
 
 	line_irq_adjust();
 	if (!port_ff_interrupt_disable())
@@ -3034,10 +3084,12 @@ void specnext_state::map_mem(address_map &map)
 		views[i].get()[1](0x0000 + i * 0x2000, 0x1fff + i * 0x2000).bankr(m_bank_ram[i]);
 
 		// bank5
-		views[i].get()[0x02a](0x0000 + i * 0x2000, 0x1fff + i * 0x2000).ram().share(m_bram_bank5).lw8(
+		views[i].get()[0x02a](0x0000 + i * 0x2000, 0x1fff + i * 0x2000).lrw8(
+			NAME([this](offs_t offset) { return m_bram_bank5[offset & 0x1fff]; }),
 			NAME([this](offs_t offset, u8 data) { m_screen->update_now(); m_bram_bank5[offset & 0x1fff] = data; })
 		);
-		views[i].get()[0x12a](0x0000 + i * 0x2000, 0x1fff + i * 0x2000).readonly().share(m_bram_bank5);
+		views[i].get()[0x12a](0x0000 + i * 0x2000, 0x1fff + i * 0x2000).lr8(
+			NAME([this](offs_t offset) { return m_bram_bank5[offset & 0x1fff]; }));
 		views[i].get()[0x02b](0x0000 + i * 0x2000, 0x1fff + i * 0x2000).lrw8(
 			NAME([this](offs_t offset) { return m_bram_bank5[0x2000 + (offset & 0x1fff)]; }),
 			NAME([this](offs_t offset, u8 data) { m_screen->update_now(); m_bram_bank5[0x2000 + (offset & 0x1fff)] = data; })
@@ -3212,8 +3264,8 @@ void specnext_state::map_io(address_map &map)
 	}));
 	map(0x133b, 0x133b).rw(FUNC(specnext_state::uart_reg_r<3>), FUNC(specnext_state::uart_reg_w<3>));
 	map(0x143b, 0x143b).rw(FUNC(specnext_state::uart_reg_r<0>), FUNC(specnext_state::uart_reg_w<0>));
-	map(0x153b, 0x153b).w(FUNC(specnext_state::uart_reg_w<1>));
-	map(0x163b, 0x163b).w(FUNC(specnext_state::uart_reg_w<2>));
+	map(0x153b, 0x153b).rw(FUNC(specnext_state::uart_reg_r<1>), FUNC(specnext_state::uart_reg_w<1>));
+	map(0x163b, 0x163b).rw(FUNC(specnext_state::uart_reg_r<2>), FUNC(specnext_state::uart_reg_w<2>));
 	map(0x243b, 0x243b).lrw8(NAME([this]() { return m_nr_register; })
 		, NAME([this](u8 data) { m_nr_register = data; }));
 	map(0x253b, 0x253b).lrw8(NAME([this]() { return m_next_regs.read_byte(m_nr_register); })
@@ -3314,7 +3366,6 @@ INPUT_PORTS_START(specnext)
 	PORT_CONFSETTING(0x00, "360x288 (HDMI)" )
 	PORT_CONFSETTING(0x01, "320x256 (VGA)" )
 	PORT_BIT(0xfe, IP_ACTIVE_HIGH, IPT_UNUSED)
-
 	PORT_START("mouse_input0")
 	PORT_BIT(0x7ff, 0, IPT_MOUSE_X) PORT_SENSITIVITY(100)
 
@@ -3411,6 +3462,7 @@ void specnext_state::machine_start()
 	// Save
 	save_item(NAME(m_page_shadow));
 	save_item(NAME(m_bootrom_en));
+	save_item(NAME(m_video_test_pattern_active));
 	save_item(NAME(m_port_ff_data));
 	save_item(NAME(m_port_1ffd_special_old));
 	save_item(NAME(m_port_1ffd_data));
@@ -3656,6 +3708,7 @@ void specnext_state::reset_hard()
 {
 	m_nr_02_hard_reset = 0;
 	m_bootrom_en = 1;
+	m_video_test_pattern_active = 0;
 
 	m_dma->dma_mode_w(0);
 	// nmi_mf = 0;
@@ -3777,6 +3830,16 @@ void specnext_state::machine_reset()
 
 	if (m_nr_02_hard_reset)
 		reset_hard();
+
+	// FPGA ym2149.vhd resets R07 to 0xFF (all tone/noise disabled); ay8910_reset_ym sets 0x00.
+	for (auto &ay : m_ay)
+	{
+		ay->address_w(0x07);
+		ay->data_w(0xff);
+	}
+
+	for (auto &dac : m_dac)
+		dac->data_w(0x80);
 
 	m_spi_clock->reset();
 	m_spi_clock_cycles = 0;
@@ -4084,7 +4147,7 @@ void specnext_state::tbblue(machine_config &config)
 	m_maincpu->set_m1_map(&specnext_state::map_fetch);
 	m_maincpu->set_memory_map(&specnext_state::map_mem);
 	m_maincpu->set_io_map(&specnext_state::map_io);
-	m_maincpu->set_vblank_int("screen", FUNC(specnext_state::specnext_interrupt));
+	m_maincpu->set_vblank_int("screen", FUNC(specnext_state::on_vblank));
 	m_maincpu->set_irq_acknowledge_callback(NAME([](device_t &, int){ return 0xff; }));
 	m_maincpu->out_nextreg_cb().set([this](offs_t offset, u8 data) { m_next_regs.write_byte(offset, data); });
 	m_maincpu->in_nextreg_cb().set([this](offs_t offset) { return m_next_regs.read_byte(offset); });
@@ -4202,6 +4265,7 @@ void specnext_state::tbblue(machine_config &config)
 	// drawgfx doesn't allow to mask palette access and in case of 256-color sprite does use offset, the index overflow palette boundries.
 	// We are duplicating palletes to imitate mask on palette index which required by sprites device.
 	SPECNEXT_SPRITES(config, m_sprites).set_palette(m_palette->device().tag(), 0x600, 0x800);
+	SPECNEXT_VTEST(config, m_vtest);
 
 	SPECNEXT_COPPER(config, m_copper, 28_MHz_XTAL);
 	m_copper->out_nextreg_cb().set([this](offs_t offset, u8 data) { m_next_regs.write_byte(offset, data); });
@@ -4209,7 +4273,9 @@ void specnext_state::tbblue(machine_config &config)
 
 	SOFTWARE_LIST(config, "sd_list").set_original("specnext_sd");
 
-	config.device_remove("snapshot");
+	snapshot_image_device &snapshot(SNAPSHOT(config.replace(), "snapshot", "ach,frz,plusd,prg,sem,sit,sna,snp,snx,sp,spg,z80,zx,nex"));
+	snapshot.set_load_callback(FUNC(specnext_state::nex_snapshot_cb));
+	snapshot.set_interface("spectrum_snapshot");
 
 	m_machine_id = 0x08;
 	m_board_issue = 0;

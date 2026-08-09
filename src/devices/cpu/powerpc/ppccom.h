@@ -31,8 +31,9 @@
     CONSTANTS
 ***************************************************************************/
 
-// size of the execution code cache
-#define CACHE_SIZE                      (32 * 1024 * 1024)
+// Size of the DRC's code cache.  Mac OS 9's idle working set alone is
+// over 32MiB of compiled code, so at 32MiB of cache the DRC was thrashing.
+#define CACHE_SIZE                      (128 * 1024 * 1024)
 
 // compilation boundaries -- how far back/forward does the analysis extend?
 #define COMPILE_BACKWARDS_BYTES         128
@@ -45,7 +46,13 @@
 #define POWERPC_MIN_PAGE_SHIFT      12
 #define POWERPC_MIN_PAGE_SIZE       (1 << POWERPC_MIN_PAGE_SHIFT)
 #define POWERPC_MIN_PAGE_MASK       (POWERPC_MIN_PAGE_SIZE - 1)
-#define POWERPC_TLB_ENTRIES         128
+// The vTLB is a cache and misses are not free.  128 entries cover only 512K of
+// address space, which is OK for ROM-based arcade games but shows itself quickly
+// otherwise.  4096 entries was measured to reduce Mac OS 8.1 on the pwrmacg3
+// driver from ~160K mismatches/second to none, and is zero-cost otherwise.
+// Note that the vTLB is *NOT* the architectural TLB; it is a cache used by the DRC.
+// PPC603_FIXED_TLB_ENTRIES is the architectural TLB size.
+#define POWERPC_TLB_ENTRIES         4096
 #define PPC603_FIXED_TLB_ENTRIES    128
 
 

@@ -394,8 +394,6 @@ if BUSES["ABCKB"] then
 		MAME_DIR .. "src/devices/bus/abckb/abc99.h",
 		MAME_DIR .. "src/devices/bus/abckb/abc800kb.cpp",
 		MAME_DIR .. "src/devices/bus/abckb/abc800kb.h",
-		MAME_DIR .. "src/devices/bus/abckb/r8.cpp",
-		MAME_DIR .. "src/devices/bus/abckb/r8.h",
 	}
 end
 
@@ -586,8 +584,14 @@ if BUSES["AMIGA_ZORRO"] then
 		MAME_DIR .. "src/devices/bus/amiga/zorro/a2091.h",
 		MAME_DIR .. "src/devices/bus/amiga/zorro/a2232.cpp",
 		MAME_DIR .. "src/devices/bus/amiga/zorro/a2232.h",
+		MAME_DIR .. "src/devices/bus/amiga/zorro/adscsi.cpp",
+		MAME_DIR .. "src/devices/bus/amiga/zorro/adscsi.h",
 		MAME_DIR .. "src/devices/bus/amiga/zorro/buddha.cpp",
 		MAME_DIR .. "src/devices/bus/amiga/zorro/buddha.h",
+		MAME_DIR .. "src/devices/bus/amiga/zorro/cybervision64.cpp",
+		MAME_DIR .. "src/devices/bus/amiga/zorro/cybervision64.h",
+		MAME_DIR .. "src/devices/bus/amiga/zorro/dkb3128.cpp",
+		MAME_DIR .. "src/devices/bus/amiga/zorro/dkb3128.h",
 		MAME_DIR .. "src/devices/bus/amiga/zorro/merlin.cpp",
 		MAME_DIR .. "src/devices/bus/amiga/zorro/merlin.h",
 		MAME_DIR .. "src/devices/bus/amiga/zorro/oktagon2008.cpp",
@@ -3413,6 +3417,8 @@ if BUSES["MSX_CTRL"] then
 	files {
 		MAME_DIR .. "src/devices/bus/msx/ctrl/ctrl.cpp",
 		MAME_DIR .. "src/devices/bus/msx/ctrl/ctrl.h",
+		MAME_DIR .. "src/devices/bus/msx/ctrl/dual_joyport.cpp",
+		MAME_DIR .. "src/devices/bus/msx/ctrl/dual_joyport.h",
 		MAME_DIR .. "src/devices/bus/msx/ctrl/hypershot.cpp",
 		MAME_DIR .. "src/devices/bus/msx/ctrl/hypershot.h",
 		MAME_DIR .. "src/devices/bus/msx/ctrl/joystick.cpp",
@@ -4060,6 +4066,8 @@ if BUSES["NSCSI"] then
 		MAME_DIR .. "src/devices/bus/nscsi/devices.h",
 		MAME_DIR .. "src/devices/bus/nscsi/dtc510.cpp",
 		MAME_DIR .. "src/devices/bus/nscsi/dtc510.h",
+		MAME_DIR .. "src/devices/bus/nscsi/et532.cpp",
+		MAME_DIR .. "src/devices/bus/nscsi/et532.h",
 		MAME_DIR .. "src/devices/bus/nscsi/hd.cpp",
 		MAME_DIR .. "src/devices/bus/nscsi/hd.h",
 		MAME_DIR .. "src/devices/bus/nscsi/pc8801_30.cpp",
@@ -4353,6 +4361,8 @@ if BUSES["PC98_CBUS"] then
 		MAME_DIR .. "src/devices/bus/pc98_cbus/options.h",
 		MAME_DIR .. "src/devices/bus/pc98_cbus/pc9801_02.cpp",
 		MAME_DIR .. "src/devices/bus/pc98_cbus/pc9801_02.h",
+		MAME_DIR .. "src/devices/bus/pc98_cbus/pc9801_03.cpp",
+		MAME_DIR .. "src/devices/bus/pc98_cbus/pc9801_03.h",
 		MAME_DIR .. "src/devices/bus/pc98_cbus/pc9801_14.cpp",
 		MAME_DIR .. "src/devices/bus/pc98_cbus/pc9801_14.h",
 		MAME_DIR .. "src/devices/bus/pc98_cbus/pc9801_26.cpp",
@@ -4901,6 +4911,8 @@ end
 
 if BUSES["RS232"] then
 	files {
+		MAME_DIR .. "src/devices/bus/rs232/auto3a.cpp",
+		MAME_DIR .. "src/devices/bus/rs232/auto3a.h",
 		MAME_DIR .. "src/devices/bus/rs232/exorterm.cpp",
 		MAME_DIR .. "src/devices/bus/rs232/exorterm.h",
 		MAME_DIR .. "src/devices/bus/rs232/heath_h19.cpp",
@@ -4929,6 +4941,8 @@ if BUSES["RS232"] then
 		MAME_DIR .. "src/devices/bus/rs232/rs232.h",
 		MAME_DIR .. "src/devices/bus/rs232/rs232_sync_io.cpp",
 		MAME_DIR .. "src/devices/bus/rs232/rs232_sync_io.h",
+		MAME_DIR .. "src/devices/bus/rs232/s97801.cpp",
+		MAME_DIR .. "src/devices/bus/rs232/s97801.h",
 		MAME_DIR .. "src/devices/bus/rs232/scorpion.cpp",
 		MAME_DIR .. "src/devices/bus/rs232/scorpion.h",
 		MAME_DIR .. "src/devices/bus/rs232/sun_kbd.cpp",
@@ -6438,6 +6452,26 @@ end
 
 ---------------------------------------------------
 --
+--@src/devices/bus/xerox820/dbslot.h,BUSES["XEROX820"] = true
+--@src/devices/bus/xerox820/copro.h,BUSES["XEROX820"] = true
+---------------------------------------------------
+
+if BUSES["XEROX820"] then
+	files {
+		MAME_DIR .. "src/devices/bus/xerox820/dbslot.cpp",
+		MAME_DIR .. "src/devices/bus/xerox820/dbslot.h",
+		MAME_DIR .. "src/devices/bus/xerox820/fdc.cpp",
+		MAME_DIR .. "src/devices/bus/xerox820/fdc.h",
+		MAME_DIR .. "src/devices/bus/xerox820/sasi.cpp",
+		MAME_DIR .. "src/devices/bus/xerox820/sasi.h",
+		MAME_DIR .. "src/devices/bus/xerox820/copro.cpp",
+		MAME_DIR .. "src/devices/bus/xerox820/copro.h",
+	}
+end
+
+
+---------------------------------------------------
+--
 --@src/devices/bus/z29_kbd/keyboard.h,BUSES["Z29_KBD"] = true
 ---------------------------------------------------
 
@@ -6468,5 +6502,26 @@ if BUSES["Z88"] then
 		MAME_DIR .. "src/devices/bus/z88/ram.h",
 		MAME_DIR .. "src/devices/bus/z88/rom.cpp",
 		MAME_DIR .. "src/devices/bus/z88/rom.h",
+	}
+end
+
+
+---------------------------------------------------
+--
+--@src/devices/bus/zbi/zbi.h,BUSES["ZBI"] = true
+---------------------------------------------------
+
+if (BUSES["ZBI"]~=null) then
+	files {
+		MAME_DIR .. "src/devices/bus/zbi/zbi.cpp",
+		MAME_DIR .. "src/devices/bus/zbi/zbi.h",
+		MAME_DIR .. "src/devices/bus/zbi/zbi_cards.cpp",
+		MAME_DIR .. "src/devices/bus/zbi/zbi_cards.h",
+		MAME_DIR .. "src/devices/bus/zbi/s8k_cpu.cpp",
+		MAME_DIR .. "src/devices/bus/zbi/s8k_cpu.h",
+		MAME_DIR .. "src/devices/bus/zbi/s8k_ram.cpp",
+		MAME_DIR .. "src/devices/bus/zbi/s8k_ram.h",
+		MAME_DIR .. "src/devices/bus/zbi/s8k_smdc.cpp",
+		MAME_DIR .. "src/devices/bus/zbi/s8k_smdc.h",
 	}
 end

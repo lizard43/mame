@@ -34,18 +34,21 @@
     CONSTANTS
 ***************************************************************************/
 
-/* map variables */
+// map variables
 #define MAPVAR_PC                       M0
 #define MAPVAR_CYCLES                   M1
 #define MAPVAR_DSISR                    M2
 
-/* mode bits */
+// mode bits
 #define MODE_LITTLE_ENDIAN              0x01
-#define MODE_DATA_TRANSLATION           0x02        /* OEA */
-#define MODE_PROTECTION                 0x02        /* 4XX */
+#define MODE_DATA_TRANSLATION           0x02        // OEA
+#define MODE_PROTECTION                 0x02        // 4XX
 #define MODE_USER                       0x04
 
-/* exit codes */
+// Mask for the actual part of a vTLB entry that needs to cause a recompile
+#define VTLB_MAPPING_MASK               (~vtlb_entry(FLAGS_MASK) | FLAG_VALID)
+
+// exit codes
 #define EXECUTE_OUT_OF_CYCLES           0
 #define EXECUTE_MISSING_CODE            1
 #define EXECUTE_UNMAPPED_CODE           2
@@ -312,6 +315,48 @@ void ppc_device::code_flush_cache()
 {
 	// empty the transient cache contents
 	m_drcuml->reset();
+
+	// no compiled code remains, so forget which pages held it
+	std::fill(m_codepage_bits.begin(), m_codepage_bits.end(), 0);
+	m_core->m_codepage_any = false;
+
+	// the generated code is gone, so the reuse entries pointing to it can be flushed
+	m_reuse_cache.clear();
+	m_last_reuse = ~uint64_t(0);
+
+	// also release the per-block translation checks
+	for (ppc_entry_check *chk : m_entry_checks)
+	{
+		m_cache.dealloc(chk, sizeof(*chk));
+	}
+	m_entry_checks.clear();
+}
+
+
+/*-------------------------------------------------
+    reuse_entry_checks - re-verify the entry checks
+    a block about to be reused was generated with,
+    and put them in the same state as a fresh compile
+-------------------------------------------------*/
+
+bool ppc_device::reuse_entry_checks(uint32_t first, uint32_t count)
+{
+	if ((first + count) > m_entry_checks.size())
+		return false;
+
+	// A fresh compile stamps the current generation into the check unconditionally, so
+	// it always passes at least once.  A reused block needs to have that updated so it
+	// doesn't immediately cause a recompile.
+	for (uint32_t i = 0; i < count; i++)
+	{
+		ppc_entry_check *const chk = m_entry_checks[first + i];
+		offs_t addr = chk->pc;
+		if ((ppccom_translate_address_internal(TR_FETCH, false, addr) > 1) || (addr != chk->physpc))
+			return false;
+
+		chk->generation = m_core->m_translation_generation;
+	}
+	return true;
 }
 
 
@@ -334,11 +379,65 @@ void ppc_device::code_compile_block(uint8_t mode, offs_t pc)
 	if (m_drcuml->logging() || m_drcuml->logging_native())
 		log_opcode_desc(desclist, 0);
 
+	// Do a signature over every word of the sequence, so the reuse check below is exact.
+	uint32_t seqsig = 0;
+	for (const opcode_desc *desc = desclist; desc != nullptr; desc = desc->next())
+	{
+		seqsig = (seqsig * 31u) ^ desc->opptr;
+	}
+
+	const uint64_t reusekey = (uint64_t(mode) << 32) | pc;
+
+	// A reused block has to make forward progress.  If the previous compile handed this
+	// same block back and we are being asked for it again, it exited straight to the
+	// nocode handler, so generate it for real rather than handing back the same code
+	// forever.
+	const uint64_t lastreuse = m_last_reuse;
+	m_last_reuse = ~uint64_t(0);
+
+	// If code was already generated for this (mode, pc) pair, from these exact words,
+	// at this exact physical address, and the cache has not been flushed since, just
+	// point the hash back at it to avoid the overhead of a recompile.
+	if ((desclist != nullptr) && (reusekey != lastreuse))
+	{
+		auto const reuse = m_reuse_cache.find(reusekey);
+		if ((reuse != m_reuse_cache.end())
+				&& (reuse->second.sig == seqsig)
+				&& (reuse->second.physpc == desclist->physpc)
+				&& reuse_entry_checks(reuse->second.checkfirst, reuse->second.checkcount)
+				&& m_drcuml->hash_set_codeptr(mode, pc, reuse->second.code))
+		{
+			// mark the pages this sequence covers as having valid code again
+			const opcode_desc *seqend = desclist;
+			while ((seqend != nullptr) && !seqend->end_sequence())
+			{
+				seqend = seqend->next();
+			}
+
+			if (seqend == nullptr)
+			{
+				seqend = desclist;
+			}
+
+			for (uint32_t pg = desclist->pc >> 12; pg <= (seqend->pc >> 12); pg++)
+			{
+				note_code_page(pg);
+			}
+			m_codewrite_skip_page = ~uint32_t(0);
+			m_last_reuse = reusekey;
+			return;
+		}
+	}
+
 	bool succeeded = false;
+	size_t checkbase = 0;
 	while (!succeeded)
 	{
 		try
 		{
+			// the entry checks this attempt generates start here
+			checkbase = m_entry_checks.size();
+
 			// start the block
 			drcuml_block &block(m_drcuml->begin_block(4096));
 
@@ -359,6 +458,11 @@ void ppc_device::code_compile_block(uint8_t mode, offs_t pc)
 						break;
 				}
 				assert(seqlast != nullptr);
+
+				// remember that the effective pages this sequence covers now hold compiled
+				// code, so a later TLB invalidation of one of them can trigger a flush
+				for (uint32_t pg = seqhead->pc >> 12; pg <= (seqlast->pc >> 12); pg++)
+					note_code_page(pg);
 
 				// if we don't have a hash for this mode/pc, or if we are overriding all, add one
 				if (override || !m_drcuml->hash_exists(mode, seqhead->pc))
@@ -381,34 +485,48 @@ void ppc_device::code_compile_block(uint8_t mode, offs_t pc)
 					continue;
 				}
 
+				// validate that the mapping this code was compiled under still holds
+				if ((m_cap & PPCCAP_OEA) && !(m_cap & PPCCAP_4XX))
+				{
+					generate_translation_check(block, &compiler, seqhead, mode);       // <translation check>
+				}
 				// validate this code block if we're not pointing into ROM
 				if (m_program->get_write_ptr(seqhead->physpc) != nullptr)
+				{
 					generate_checksum_block(block, &compiler, seqhead, seqlast);               // <checksum>
-
+				}
 				// label this instruction, if it may be jumped to locally
 				if (seqhead->is_branch_target())
+				{
 					UML_LABEL(block, seqhead->pc | 0x80000000);                                     // label   seqhead->pc | 0x80000000
-
+				}
 				// iterate over instructions in the sequence and compile them
 				for (curdesc = seqhead; curdesc != seqlast->next(); curdesc = curdesc->next())
+				{
 					generate_sequence_instruction(block, &compiler, curdesc);                  // <instruction>
-
+				}
 				// if we need to return to the start, do it
 				if (seqlast->return_to_start())
+				{
 					nextpc = pc;
-
+				}
 				// otherwise we just go to the next instruction
 				else
+				{
 					nextpc = seqlast->pc + (seqlast->skipslots + 1) * 4;
-
+				}
 				// count off cycles and go there
 				generate_update_cycles(block, &compiler, nextpc, true);                    // <subtract cycles>
 
 				// if the last instruction can change modes, use a variable mode; otherwise, assume the same mode
 				if (seqlast->can_change_modes())
+				{
 					UML_HASHJMP(block, mem(&m_core->mode), nextpc, *m_nocode);// hashjmp <mode>,nextpc,nocode
+				}
 				else if (seqlast->next() == nullptr || seqlast->next()->pc != nextpc)
+				{
 					UML_HASHJMP(block, m_core->mode, nextpc, *m_nocode);// hashjmp <mode>,nextpc,nocode
+				}
 			}
 
 			// end the sequence
@@ -421,6 +539,22 @@ void ppc_device::code_compile_block(uint8_t mode, offs_t pc)
 			code_flush_cache();
 		}
 	}
+
+	// remember what was generated so an identical recompile can reuse it
+	if (desclist != nullptr)
+	{
+		drccodeptr const code = m_drcuml->hash_get_codeptr(mode, pc);
+		if (code != nullptr)
+		{
+			m_reuse_cache[reusekey] = reuse_entry{
+					code, desclist->physpc, seqsig,
+					uint32_t(checkbase), uint32_t(m_entry_checks.size() - checkbase) };
+		}
+	}
+
+	// The 601 write watcher holds one page's code bit clear across exactly this
+	// recompile, so clear it.
+	m_codewrite_skip_page = ~uint32_t(0);
 }
 
 
@@ -499,6 +633,37 @@ void ppc_device::ppc_cfunc_printf_probe()
     unimplemented opcdes
 -------------------------------------------------*/
 
+/*-------------------------------------------------
+    is_floating_point_op - does this instruction
+    need the floating point unit enabled?
+-------------------------------------------------*/
+
+static bool is_floating_point_op(uint32_t op)
+{
+	switch (op >> 26)
+	{
+		case 0x30:  case 0x31:  case 0x32:  case 0x33:  // lfs, lfsu, lfd, lfdu
+		case 0x34:  case 0x35:  case 0x36:  case 0x37:  // stfs, stfsu, stfd, stfdu
+		case 0x3b:                                      // single precision arithmetic
+		case 0x3f:                                      // double precision arithmetic, FPSCR
+			return true;
+
+		case 0x1f:
+			switch ((op >> 1) & 0x3ff)
+			{
+				case 0x217: case 0x237:                 // lfsx, lfsux
+				case 0x257: case 0x277:                 // lfdx, lfdux
+				case 0x297: case 0x2b7:                 // stfsx, stfsux
+				case 0x2d7: case 0x2f7:                 // stfdx, stfdux
+				case 0x3d7:                             // stfiwx
+					return true;
+			}
+			break;
+	}
+	return false;
+}
+
+
 static void cfunc_unimplemented(ppc_device &ppc)
 {
 	ppc.ppc_cfunc_unimplemented();
@@ -535,6 +700,11 @@ static void cfunc_ppccom_dcstore_callback(ppc_device &ppc)
 	ppc.ppccom_dcstore_callback();
 }
 
+static void cfunc_ppccom_dcbz_check(ppc_device &ppc)
+{
+	ppc.ppccom_dcbz_check();
+}
+
 static void cfunc_ppccom_execute_tlbie(ppc_device &ppc)
 {
 	ppc.ppccom_execute_tlbie();
@@ -565,9 +735,25 @@ static void cfunc_ppccom_execute_mtspr(ppc_device &ppc)
 	ppc.ppccom_execute_mtspr();
 }
 
-static void cfunc_ppccom_tlb_flush(ppc_device &ppc)
+static void cfunc_ppccom_execute_mtsr(ppc_device &ppc)
 {
-	ppc.ppccom_tlb_flush();
+	ppc.ppccom_execute_mtsr();
+}
+
+static void cfunc_ppccom_invalidate_codepage(ppc_device &ppc)
+{
+	ppc.ppccom_invalidate_codepage();
+}
+
+static void cfunc_ppccom_execute_icbi(ppc_device &ppc)
+{
+	ppc.ppccom_execute_icbi();
+}
+
+static void cfunc_ppc_check_translation(void *param)
+{
+	auto *chk = reinterpret_cast<ppc_device::ppc_entry_check *>(param);
+	chk->ppc->ppc_check_translation(chk);
 }
 
 static void cfunc_ppccom_execute_mfdcr(ppc_device &ppc)
@@ -650,6 +836,42 @@ void ppc_device::static_generate_nocode_handler()
 	save_fast_iregs(block);                                                            // <save fastregs>
 	save_fast_fregs(block);
 	UML_EXIT(block, EXECUTE_MISSING_CODE);                                              // exit    EXECUTE_MISSING_CODE
+
+	block.end();
+}
+
+
+/*-------------------------------------------------
+    static_generate_code_write_reset - handler
+    reached (via EXH) when a store lands on a page
+    holding compiled code.
+
+    On the 601 (only!) self-modification is legal
+    without icbi, so invalidate the page's compiled
+    code then re-execute the store so it recompiles
+    from the new bytes.
+-------------------------------------------------*/
+
+void ppc_device::static_generate_code_write_reset()
+{
+	drcuml_block &block(m_drcuml->begin_invariant_block(20));
+
+	alloc_handle(m_drcuml.get(), &m_code_write_reset, "code_write_reset");
+	UML_HANDLE(block, *m_code_write_reset);                                // handle  code_write_reset
+	UML_GETEXP(block, I0);                                                 // getexp  i0 (effective store address)
+	UML_MOV(block, mem(&m_core->param0), I0);                              // mov     [param0],i0
+	UML_RECOVER(block, I0, MAPVAR_PC);                                     // recover i0,PC (the store instruction)
+	UML_MOV(block, mem(&m_core->param1), I0);                              // mov     [param1],i0
+
+	// Invalidate the page and resume at the store's own PC (re-execute it,
+	// preserving update/multi-store side effects).  With the page's code
+	// bit now clear the store completes instead of re-triggering the watcher.
+	UML_CALLC(block, cfunc_ppccom_invalidate_codepage, this);              // callc   invalidate_codepage,ppc
+	UML_MOV(block, I0, mem(&m_core->param1));                              // mov     i0,[param1] (resume PC)
+	UML_MOV(block, mem(&m_core->pc), I0);                                  // mov     [pc],i0
+	save_fast_iregs(block);                                                // <save fastregs>
+	save_fast_fregs(block);
+	UML_EXIT(block, EXECUTE_MISSING_CODE);                                 // exit    EXECUTE_MISSING_CODE
 
 	block.end();
 }
@@ -956,6 +1178,15 @@ void ppc_device::static_generate_memory_accessor(
 	alloc_handle(m_drcuml.get(), &handleptr, name);
 	UML_HANDLE(block, *handleptr);                                                          // handle  *handleptr
 
+	// The 601 has a unified I+D cache, so self-modifying code can omit
+	// icbi.  If PPCDRC_STRICT_601_SELF_MODIFY is set, remember the address so
+	// we can detect a write to a page containing compiled code.
+	const bool codewatch = iswrite && !ismasked && !isreserve && (m_flavor == PPC_MODEL_601)
+			&& (m_drcoptions & PPCDRC_STRICT_601_SELF_MODIFY);
+	if (codewatch)
+	{
+		UML_MOV(block, mem(&m_core->m_codewatch_ea), I0);                     // mov     [m_codewatch_ea],i0
+	}
 	// check for unaligned accesses and break into two
 	if (!ismasked && size != 1)
 	{
@@ -1166,6 +1397,22 @@ void ppc_device::static_generate_memory_accessor(
 			}
 			break;
 	}
+
+	// 601 codewatch continued: if the store is to a page with compiled code,
+	// invalidate it and re-dispatch (re-executing this store) so the modified
+	// code gets recompiled.
+	if (codewatch)
+	{
+		UML_SHR(block, I3, mem(&m_core->m_codewatch_ea), 12);                        // shr     i3,[m_codewatch_ea],12
+		UML_AND(block, I3, I3, 0xfffff);                                             // and     i3,i3,0xfffff (page index)
+		UML_SHR(block, I2, I3, 3);                                                   // shr     i2,i3,3 (byte offset)
+		UML_LOAD(block, I2, m_codepage_bits.data(), I2, SIZE_BYTE, SCALE_x1);        // load    i2,codepage_bits,i2,byte
+		UML_AND(block, I3, I3, 7);                                                   // and     i3,i3,7 (bit index)
+		UML_SHR(block, I2, I2, I3);                                                  // shr     i2,i2,i3
+		UML_TEST(block, I2, 1);                                                      // test    i2,1
+		UML_EXHc(block, COND_NZ, *m_code_write_reset, mem(&m_core->m_codewatch_ea)); // exh code_write_reset,ea,nz
+	}
+
 	UML_RET(block);                                                                         // ret
 
 	// handle unaligned accesses
@@ -1584,6 +1831,68 @@ void ppc_device::generate_update_cycles(drcuml_block &block, compiler_state *com
 
 
 /*-------------------------------------------------
+    generate_recompile_if - flush the DRC cache
+    baed on a flag.
+-------------------------------------------------*/
+
+void ppc_device::generate_recompile_if(drcuml_block &block, compiler_state *compiler, const opcode_desc *desc, uml::parameter flag, int exitcode)
+{
+	uml::code_label const no_reset = compiler->labelnum++;
+	compiler->checkints = false;
+	generate_update_cycles(block, compiler, desc->pc + 4, false);          // Update the cycle count until this point
+	UML_CMP(block, flag, 0);                                               // cmp     flag,0
+	UML_JMPc(block, COND_Z, no_reset);                                     // jz      no_reset
+	save_fast_iregs(block);
+	save_fast_fregs(block);
+	UML_MOV(block, mem(&m_core->pc), desc->pc + 4);                        // mov     [pc],desc->pc+4
+	UML_EXIT(block, exitcode);                                             // exit    exitcode
+	UML_LABEL(block, no_reset);                                            // no_reset:
+}
+
+
+/*-------------------------------------------------
+    generate_translation_check - generate code to
+    validate that a block's logical and physical
+    mapping is still the same as when it was compiled.
+-------------------------------------------------*/
+
+void ppc_device::generate_translation_check(drcuml_block &block, compiler_state *compiler, const opcode_desc *seqhead, uint8_t mode)
+{
+	if (seqhead->virtual_noop())
+	{
+		return;
+	}
+	// Allocate from the permanent cache region (the code region is not
+	// writable during execution); released again on cache flush
+	auto *chk = reinterpret_cast<ppc_entry_check *>(m_cache.alloc(sizeof(ppc_entry_check), std::align_val_t(alignof(ppc_entry_check))));
+	if (chk == nullptr)
+	{
+		// Allocation failed, out of cache
+		m_cache_dirty = true;
+		return;
+	}
+	m_entry_checks.push_back(chk);
+	chk->ppc = this;
+	chk->generation = m_core->m_translation_generation;
+	chk->pc = seqhead->pc;
+
+	// Stash the physical address, including the little-endian swizzle
+	chk->physpc = seqhead->physpc ^ ((mode & MODE_LITTLE_ENDIAN) ? 4 : 0);
+
+	uml::code_label const gen_current = compiler->labelnum++;
+	UML_LOAD(block, I0, &chk->generation, 0, SIZE_DWORD, SCALE_x1);        // load    i0,chk->generation
+	UML_CMP(block, I0, mem(&m_core->m_translation_generation));            // cmp     i0,[m_translation_generation]
+	UML_JMPc(block, COND_E, gen_current);                                  // je      gen_current
+	UML_CALLC(block, cfunc_ppc_check_translation, chk);                    // callc   ppc_check_translation,chk
+	UML_CMP(block, mem(&m_core->param1), 0);                               // cmp     [param1],0
+	UML_EXHc(block, COND_NE, *m_nocode, seqhead->pc);                      // exhne   nocode,seqhead->pc
+
+	// gen_current:
+	UML_LABEL(block, gen_current);
+}
+
+
+/*-------------------------------------------------
     generate_checksum_block - generate code to
     validate a sequence of opcodes
 -------------------------------------------------*/
@@ -1606,38 +1915,27 @@ void ppc_device::generate_checksum_block(drcuml_block &block, compiler_state *co
 		}
 	}
 
-	// full verification; sum up everything
+	// full verification; expect every opcode to match exactly.  A plain sum can
+	// falsely pass when code is rewritten with the same opcodes in a different
+	// order (e.g. the Mac ROM's 68K emulator recycling its translation buffer),
+	// so XOR each fetched opcode with its expected value and OR the differences.
 	else
 	{
-#if 0
-		for (curdesc = seqhead->next(); curdesc != seqlast->next(); curdesc = curdesc->next())
-		{
-			if (!curdesc->virtual_noop())
-			{
-				const void *base = m_prptr(seqhead->physpc);
-				UML_LOAD(block, I0, base, 0, SIZE_DWORD, SCALE_x4);
-				UML_CMP(block, I0, curdesc->opptr);
-				UML_EXHc(block, COND_NE, *m_nocode, seqhead->pc);
-			}
-		}
-#else
-		uint32_t sum = 0;
 		const void *base = m_prptr(seqhead->physpc);
 		UML_LOAD(block, I0, base, 0, SIZE_DWORD, SCALE_x4);
-		sum += seqhead->opptr;
+		UML_XOR(block, I0, I0, seqhead->opptr);
 		for (curdesc = seqhead->next(); curdesc != seqlast->next(); curdesc = curdesc->next())
 		{
 			if (!curdesc->virtual_noop())
 			{
 				base = m_prptr(curdesc->physpc);
 				UML_LOAD(block, I1, base, 0, SIZE_DWORD, SCALE_x4);
-				UML_ADD(block, I0, I0, I1);
-				sum += curdesc->opptr;
+				UML_XOR(block, I1, I1, curdesc->opptr);
+				UML_OR(block, I0, I0, I1);
 			}
 		}
-		UML_CMP(block, I0, sum);
+		UML_CMP(block, I0, 0);
 		UML_EXHc(block, COND_NE, *m_nocode, seqhead->pc);
-#endif
 	}
 }
 
@@ -1725,15 +2023,17 @@ void ppc_device::generate_sequence_instruction(drcuml_block &block, compiler_sta
 			{
 				const char *text = "Checking TLB at @ %08X\n";
 				if (sizeof(uintptr_t) == 8)
-					UML_DMOV(block, mem(&m_core->format), (uintptr_t)text);                   // mov     [format],text
+					UML_DMOV(block, mem(&m_core->format), (uintptr_t)text);                 // mov     [format],text
 				else
-					UML_MOV(block, mem(&m_core->format), (uintptr_t)text);                    // mov     [format],text
-				UML_MOV(block, mem(&m_core->arg0), desc->pc);                    // mov     [arg0],desc->pc
-				UML_CALLC(block, cfunc_printf_debug, this);                                  // callc   printf_debug
+					UML_MOV(block, mem(&m_core->format), (uintptr_t)text);                  // mov     [format],text
+				UML_MOV(block, mem(&m_core->arg0), desc->pc);                               // mov     [arg0],desc->pc
+				UML_CALLC(block, cfunc_printf_debug, this);                                 // callc   printf_debug
 			}
-			UML_LOAD(block, I0, &tlbtable[desc->pc >> 12], 0, SIZE_DWORD, SCALE_x4);// load    i0,tlbtable[desc->pc >> 12],dword
-			UML_CMP(block, I0, tlbtable[desc->pc >> 12]);                           // cmp     i0,*tlbentry
-			UML_EXHc(block, COND_NE, *m_tlb_mismatch, 0);                  // exh     tlb_mismatch,0,NE
+			// Use a mask to only compare the parts of the TLB that actually matter for possibly recompiling a block
+			UML_LOAD(block, I0, &tlbtable[desc->pc >> 12], 0, SIZE_DWORD, SCALE_x4);		// load    i0,tlbtable[desc->pc >> 12],dword
+			UML_AND(block, I0, I0, VTLB_MAPPING_MASK);                                      // and     i0,i0,VTLB_MAPPING_MASK
+			UML_CMP(block, I0, tlbtable[desc->pc >> 12] & VTLB_MAPPING_MASK);               // cmp     i0,*tlbentry & VTLB_MAPPING_MASK
+			UML_EXHc(block, COND_NE, *m_tlb_mismatch, 0);                                   // exh     tlb_mismatch,0,NE
 		}
 
 		// otherwise, we generate an unconditional exception
@@ -1765,6 +2065,14 @@ void ppc_device::generate_sequence_instruction(drcuml_block &block, compiler_sta
 	}
 	else if (!desc->virtual_noop())
 	{
+		// If this is an FPU instruction and MSR[FP] is clear, generate a "NO FPU" exception.
+		// Mac OS uses this for a sort of lazy FPU context switching.
+		if ((m_cap & PPCCAP_OEA) && is_floating_point_op(desc->opptr))
+		{
+			UML_TEST(block, mem(&m_core->msr), MSROEA_FP);                  // test    [msr],MSROEA_FP
+			UML_EXHc(block, COND_Z, *m_exception[EXCEPTION_NOFPU], 0);      // exh     nofpu,0,z
+		}
+
 		// otherwise, unless this is a virtual no-op, it's a regular instruction
 		// compile the instruction
 		if (!generate_opcode(block, compiler, desc))
@@ -3058,29 +3366,34 @@ bool ppc_device::generate_instruction_1f(drcuml_block &block, compiler_state *co
 
 		case 0x1cb:  // DIVWUx
 		case 0x3cb:  // DIVWUOx
-			UML_CMP(block, R32(G_RB(op)), 0x0);                 // cmp rb, #0
-			UML_JMPc(block, COND_NZ, compiler->labelnum);       // bne 0:
+			// The 601 returns magic (POWER back-compat?) values for the
+			// divide-by-zero and 0x80000000 / -1 overflow cases.
+			// Verified on hardware by DingusDev (thanks!)
+			UML_CMP(block, R32(G_RB(op)), 0x0);                                      // cmp rb, #0
+			UML_JMPc(block, COND_NZ, compiler->labelnum);                            // bne 0:
 
-			UML_MOV(block, R32(G_RD(op)), 0x0);                 // mov rd, #0
+			UML_MOV(block, R32(G_RD(op)), (m_flavor == PPC_MODEL_601) ? 0xffffffff : 0x00000000); // mov rd, <by-zero result>
 			if (op & M_OE)
 			{
-				UML_OR(block, XERSO32, XERSO32, 0x1);           // SO |= 1
-				UML_OR(block, SPR32(SPR_XER), SPR32(SPR_XER), XER_OV);  // OV |= 1
+				UML_OR(block, XERSO32, XERSO32, 0x1);                                // SO |= 1
+				UML_OR(block, SPR32(SPR_XER), SPR32(SPR_XER), XER_OV);               // OV |= 1
 			}
 			if (op & M_RC)
 			{
-				UML_MOV(block, CR32(0), 0x2);                   // CR = EQ
+				UML_MOV(block, CR32(0), (m_flavor == PPC_MODEL_601) ? 0x8 : 0x2);    // CR = LT (601) / EQ
 				UML_AND(block, CR32(0), CR32(0), ~0x1);
 				UML_OR(block, CR32(0), CR32(0), XERSO32);
 			}
 
-			UML_JMP(block, compiler->labelnum+1);               // jmp 1:
+			UML_JMP(block, compiler->labelnum + 1);                                  // jmp 1:
 
-			UML_LABEL(block, compiler->labelnum++);             // 0:
-			UML_DIVU(block, R32(G_RD(op)), R32(G_RD(op)), R32(G_RA(op)), R32(G_RB(op)));    // divu    rd,rd,ra,rb
-			generate_compute_flags(block, desc, op & M_RC, ((op & M_OE) ? XER_OV : 0), false);// <update flags>
+			// 0:
+			UML_LABEL(block, compiler->labelnum++);
+			UML_DIVU(block, R32(G_RD(op)), R32(G_RD(op)), R32(G_RA(op)), R32(G_RB(op)));       // divu    rd,rd,ra,rb
+			generate_compute_flags(block, desc, op & M_RC, ((op & M_OE) ? XER_OV : 0), false); // <update flags>
 
-			UML_LABEL(block, compiler->labelnum++);             // 1:
+			// 1:
+			UML_LABEL(block, compiler->labelnum++);
 			return true;
 
 		case 0x14b:  // DIV (POWER)
@@ -3147,79 +3460,145 @@ bool ppc_device::generate_instruction_1f(drcuml_block &block, compiler_state *co
 
 		case 0x1eb:  // DIVWx
 		case 0x3eb:  // DIVWOx
-			UML_CMP(block, R32(G_RB(op)), 0x0);                 // cmp rb, #0
-			UML_JMPc(block, COND_NZ, compiler->labelnum);       // bne 0:
-			UML_CMP(block, R32(G_RA(op)), 0x80000000);          // cmp ra, #80000000
-			UML_JMPc(block, COND_AE, compiler->labelnum);       // bae 0:
-
-			UML_MOV(block, R32(G_RD(op)), 0x0);                 // move rd, #0
-			if (op & M_OE)
+			// As with DIVWUx/DIVWUOx the 601 has unique return values for corner cases
+			if (m_flavor == PPC_MODEL_601)
 			{
-				UML_OR(block, XERSO32, XERSO32, 0x1);           // SO |= 1
-				UML_OR(block, SPR32(SPR_XER), SPR32(SPR_XER), XER_OV);  // OV |= 1
+				uml::code_label const ra_neg = compiler->labelnum++;
+				uml::code_label const chk_ovf = compiler->labelnum++;
+				uml::code_label const do_div = compiler->labelnum++;
+				uml::code_label const done = compiler->labelnum++;
+
+				UML_CMP(block, R32(G_RB(op)), 0x0);                        // cmp rb, #0
+				UML_JMPc(block, COND_NZ, chk_ovf);                         // bne chk_ovf:  (rb != 0)
+
+				// rb == 0:
+				UML_CMP(block, R32(G_RA(op)), 0x80000000);                 // cmp ra, #80000000
+				UML_JMPc(block, COND_AE, ra_neg);                          // bae ra_neg:  (ra < 0)
+				UML_MOV(block, R32(G_RD(op)), 0xffffffff);                 // mov rd, #ffffffff  (ra >= 0)
+
+				if (op & M_OE)
+				{
+					UML_OR(block, XERSO32, XERSO32, 0x1);                  // SO |= 1
+					UML_OR(block, SPR32(SPR_XER), SPR32(SPR_XER), XER_OV); // OV |= 1
+				}
+
+				if (op & M_RC)
+				{
+					UML_MOV(block, CR32(0), 0x8);                          // CR = LT
+					UML_AND(block, CR32(0), CR32(0), ~0x1);
+					UML_OR(block, CR32(0), CR32(0), XERSO32);
+				}
+				UML_JMP(block, done); // jmp done:
+
+				// ra_neg:  (ra < 0)
+				UML_LABEL(block, ra_neg);
+				UML_MOV(block, R32(G_RD(op)), 0x1); // mov rd, #1
+				if (op & M_OE)
+				{
+					UML_OR(block, XERSO32, XERSO32, 0x1);                  // SO |= 1
+					UML_OR(block, SPR32(SPR_XER), SPR32(SPR_XER), XER_OV); // OV |= 1
+				}
+				if (op & M_RC)
+				{
+					UML_MOV(block, CR32(0), 0x4);                          // CR = GT
+					UML_AND(block, CR32(0), CR32(0), ~0x1);
+					UML_OR(block, CR32(0), CR32(0), XERSO32);
+				}
+				UML_JMP(block, done);                                      // jmp done:
+
+				// chk_ovf:  (rb != 0)
+				UML_LABEL(block, chk_ovf);
+				UML_CMP(block, R32(G_RB(op)), 0xffffffff);                 // cmp rb, #ffffffff
+				UML_JMPc(block, COND_NZ, do_div);                          // bne do_div:
+				UML_CMP(block, R32(G_RA(op)), 0x80000000);                 // cmp ra, #80000000
+				UML_JMPc(block, COND_NZ, do_div);                          // bne do_div:
+
+				// ra == 0x80000000 && rb == -1: result = 0x80000000
+				UML_MOV(block, R32(G_RD(op)), 0x80000000);                 // mov rd, #80000000
+				if (op & M_OE)
+				{
+					UML_OR(block, XERSO32, XERSO32, 0x1);                  // SO |= 1
+					UML_OR(block, SPR32(SPR_XER), SPR32(SPR_XER), XER_OV); // OV |= 1
+				}
+				if (op & M_RC)
+				{
+					UML_MOV(block, CR32(0), 0x8);                          // CR = LT
+					UML_AND(block, CR32(0), CR32(0), ~0x1);
+					UML_OR(block, CR32(0), CR32(0), XERSO32);
+				}
+				UML_JMP(block, done);                                      // jmp done:
+
+				// do_div:
+				UML_LABEL(block, do_div);
+				UML_DIVS(block, R32(G_RD(op)), R32(G_RD(op)), R32(G_RA(op)), R32(G_RB(op)));       // divs    rd,rd,ra,rb
+				generate_compute_flags(block, desc, op & M_RC, ((op & M_OE) ? XER_OV : 0), false); // <update flags>
+
+				UML_LABEL(block, done); // done:
+				return true;
 			}
-			if (op & M_RC)
+			else
 			{
-				UML_MOV(block, CR32(0), 0x2);                   // CR = EQ
-				UML_AND(block, CR32(0), CR32(0), ~0x1);
-				UML_OR(block, CR32(0), CR32(0), XERSO32);
+				// all other PPC chips return 0 for undefined cases
+				uml::code_label const undefined = compiler->labelnum++;
+				uml::code_label const do_div = compiler->labelnum++;
+				uml::code_label const done = compiler->labelnum++;
+
+				UML_CMP(block, R32(G_RB(op)), 0x0);                        // cmp rb, #0
+				UML_JMPc(block, COND_Z, undefined);                        // beq undefined:  (rb == 0)
+				UML_CMP(block, R32(G_RB(op)), 0xffffffff);                 // cmp rb, #ffffffff
+				UML_JMPc(block, COND_NZ, do_div);                          // bne do_div:
+				UML_CMP(block, R32(G_RA(op)), 0x80000000);                 // cmp ra, #80000000
+				UML_JMPc(block, COND_NZ, do_div);                          // bne do_div:
+
+				// undefined:
+				UML_LABEL(block, undefined);
+				UML_MOV(block, R32(G_RD(op)), 0x0);                        // mov rd, #0
+				if (op & M_OE)
+				{
+					UML_OR(block, XERSO32, XERSO32, 0x1);                  // SO |= 1
+					UML_OR(block, SPR32(SPR_XER), SPR32(SPR_XER), XER_OV); // OV |= 1
+				}
+				if (op & M_RC)
+				{
+					UML_MOV(block, CR32(0), 0x2);                          // CR = EQ
+					UML_AND(block, CR32(0), CR32(0), ~0x1);
+					UML_OR(block, CR32(0), CR32(0), XERSO32);
+				}
+				UML_JMP(block, done); // jmp done:
+
+				// do_div:
+				UML_LABEL(block, do_div);
+				UML_DIVS(block, R32(G_RD(op)), R32(G_RD(op)), R32(G_RA(op)), R32(G_RB(op)));       // divs    rd,rd,ra,rb
+				generate_compute_flags(block, desc, op & M_RC, ((op & M_OE) ? XER_OV : 0), false); // <update flags>
+
+				UML_LABEL(block, done); // done:
+				return true;
 			}
-
-			UML_JMP(block, compiler->labelnum+3);               // jmp 3:
-
-			UML_LABEL(block, compiler->labelnum++);             // 0:
-			UML_CMP(block, R32(G_RB(op)), 0x0);                 // cmp rb, #0
-			UML_JMPc(block, COND_Z, compiler->labelnum);        // beq 1:
-
-			UML_CMP(block, R32(G_RB(op)), 0xffffffff);          // cmp rb, #ffffffff
-			UML_JMPc(block, COND_NZ, compiler->labelnum+1);     // bne 2:
-			UML_CMP(block, R32(G_RA(op)), 0x80000000);          // cmp ra, #80000000
-			UML_JMPc(block, COND_NZ, compiler->labelnum+1);     // bne 2:
-
-			UML_LABEL(block, compiler->labelnum++);             // 1:
-			UML_MOV(block, R32(G_RD(op)), 0xffffffff);          // move rd, #ffffffff
-			if (op & M_OE)
-			{
-				UML_OR(block, XERSO32, XERSO32, 0x1);           // SO |= 1
-				UML_OR(block, SPR32(SPR_XER), SPR32(SPR_XER), XER_OV);  // OV |= 1
-			}
-			if (op & M_RC)
-			{
-				UML_MOV(block, CR32(0), 0x8);                   // CR = LT
-				UML_AND(block, CR32(0), CR32(0), ~0x1);
-				UML_OR(block, CR32(0), CR32(0), XERSO32);
-			}
-			UML_JMP(block, compiler->labelnum+1);               // jmp 3:
-
-			UML_LABEL(block, compiler->labelnum++);             // 2:
-			UML_DIVS(block, R32(G_RD(op)), R32(G_RD(op)), R32(G_RA(op)), R32(G_RB(op)));    // divs    rd,rd,ra,rb
-			generate_compute_flags(block, desc, op & M_RC, ((op & M_OE) ? XER_OV : 0), false);// <update flags>
-
-			UML_LABEL(block, compiler->labelnum++);             // 3:
-			return true;
 
 		case 0x108:  // DOZ (POWER)
 			assert(m_cap & PPCCAP_LEGACY_POWER);
 
-			UML_CMP(block, R32(G_RA(op)), R32(G_RB(op)));   // cmp ra, rb
-			UML_JMPc(block, COND_L, compiler->labelnum); // bl 0:
+			UML_CMP(block, R32(G_RA(op)), R32(G_RB(op)));                  // cmp ra, rb
+			UML_JMPc(block, COND_L, compiler->labelnum);                   // bl 0:
 
-			UML_XOR(block, R32(G_RD(op)), R32(G_RD(op)), R32(G_RD(op)));    // xor rd, rd, rd (rd = 0)
-			UML_JMP(block, compiler->labelnum+1); // jmp 1:
+			UML_XOR(block, R32(G_RD(op)), R32(G_RD(op)), R32(G_RD(op)));   // xor rd, rd, rd (rd = 0)
+			UML_JMP(block, compiler->labelnum+1);                          // jmp 1:
 
-			UML_LABEL(block, compiler->labelnum++); // 0:
-			UML_SUB(block, R32(G_RD(op)), R32(G_RB(op)), R32(G_RA(op))); // rd = rb - ra
+			// 0:
+			UML_LABEL(block, compiler->labelnum++);
+			UML_SUB(block, R32(G_RD(op)), R32(G_RB(op)), R32(G_RA(op)));   // rd = rb - ra
 
-			UML_LABEL(block, compiler->labelnum++); // 1:
+			// 1:
+			UML_LABEL(block, compiler->labelnum++);
 			if (op & M_OE)
 			{
-				UML_OR(block, XERSO32, XERSO32, 0x1);                  // SO |= 1
-				UML_OR(block, SPR32(SPR_XER), SPR32(SPR_XER), XER_OV); // OV |= 1
+				UML_OR(block, XERSO32, XERSO32, 0x1);                      // SO |= 1
+				UML_OR(block, SPR32(SPR_XER), SPR32(SPR_XER), XER_OV);     // OV |= 1
 			}
 			if (op & M_RC)
 			{
-				UML_TEST(block, R32(G_RD(op)), ~0);                       // test    rd,~0
-				generate_compute_flags(block, desc, op & M_RC, 0, false); // <update flags>
+				UML_TEST(block, R32(G_RD(op)), ~0);                        // test    rd,~0
+				generate_compute_flags(block, desc, op & M_RC, 0, false);  // <update flags>
 			}
 			return true;
 
@@ -3229,13 +3608,13 @@ bool ppc_device::generate_instruction_1f(drcuml_block &block, compiler_state *co
 
 			// is rA already the correct sign (positive for ABS, negative for NABS)?
 			UML_CMP(block, R32(G_RA(op)), 0);
-			if (op & 0x080)
+			if (opswitch & 0x080)
 			{
-				UML_JMPc(block, COND_L, compiler->labelnum); // bl 0:
+				UML_JMPc(block, COND_L, compiler->labelnum); // bl 0: (NABS case)
 			}
 			else
 			{
-				UML_JMPc(block, COND_GE, compiler->labelnum); // bge 0:
+				UML_JMPc(block, COND_GE, compiler->labelnum); // bge 0: (ABS case)
 			}
 
 			UML_SUB(block, I0, 0, R32(G_RA(op)));   // sub 0, ra (make positive)
@@ -3754,25 +4133,53 @@ bool ppc_device::generate_instruction_1f(drcuml_block &block, compiler_state *co
 			return true;
 
 		case 0x3d6:  // ICBI
-			// the frontend marks this as end-of-block so in theory we don't need to flush
-			// the entire cache, but I'm going to be paranoid.
-			compiler->checkints = false;
-			generate_update_cycles(block, compiler, desc->pc + 4, false);          // <subtract cycles>
-			save_fast_iregs(block);                                                // <save fastregs>
-			save_fast_fregs(block);
-			UML_MOV(block, mem(&m_core->pc), desc->pc + 4);                        // mov     [pc],desc->pc+4
-			UML_EXIT(block, EXECUTE_RESET_CACHE);                                  // exit    EXECUTE_RESET_CACHE
+			// MMU mapping changes will now invalidate code blocks, so this brute
+			// force approach should never be needed.  But it's here just in case.
+			if (m_drcoptions & PPCDRC_FULL_CACHE_FLUSH)
+			{
+				compiler->checkints = false;
+				generate_update_cycles(block, compiler, desc->pc + 4, false);      // <subtract cycles>
+				save_fast_iregs(block);                                            // <save fastregs>
+				save_fast_fregs(block);
+				UML_MOV(block, mem(&m_core->pc), desc->pc + 4);                    // mov     [pc],desc->pc+4
+				UML_EXIT(block, EXECUTE_RESET_CACHE);                              // exit    EXECUTE_RESET_CACHE
+			}
+			else
+			{
+				// invalidate the page's hash entries so no stale block can be
+				// re-entered.  The entry checksum can't catch this on its own
+				// because blocks re-entered through a local branch label bypass it.
+				UML_ADD(block, I0, R32Z(G_RA(op)), R32(G_RB(op)));                 // add     i0,ra,rb
+				UML_MOV(block, mem(&m_core->param0), I0);                          // mov     [param0],i0
+				UML_MOV(block, mem(&m_core->param1), desc->pc);                    // mov     [param1],desc->pc
+				UML_CALLC(block, cfunc_ppccom_execute_icbi, this);                 // callc   ppccom_execute_icbi,ppc
+				// ppccom_execute_icbi() sets param1 if the page being
+				// invalidated may include this block.  Exit now so the
+				// remainder of the block is re-entered by a fresh lookup.
+				generate_recompile_if(block, compiler, desc, uml::mem(&m_core->param1), EXECUTE_MISSING_CODE);
+			}
 			return true;
 
 		case 0x3f6: // DCBZ
-			UML_ADD(block, I0, R32Z(G_RA(op)), R32(G_RB(op)));                          // add     i0,ra,rb
-			UML_AND(block, mem(&m_core->tempaddr), I0, ~(m_cache_line_size - 1));
-																						// and     [tempaddr],i0,~(cache_line_size - 1)
-			for (item = 0; item < m_cache_line_size / 8; item++)
 			{
-				UML_ADD(block, I0, mem(&m_core->tempaddr), 8 * item);           // add     i0,[tempaddr],8*item
-				UML_DMOV(block, I1, 0);                                         // dmov    i1,0
-				UML_CALLH(block, *m_write64[m_core->mode]);                     // callh   write64
+				uml::code_label const skip = compiler->labelnum++;
+				UML_ADD(block, I0, R32Z(G_RA(op)), R32(G_RB(op)));                          // add     i0,ra,rb
+				UML_AND(block, mem(&m_core->tempaddr), I0, ~(m_cache_line_size - 1));
+																							// and     [tempaddr],i0,~(cache_line_size - 1)
+				if (m_drcoptions & PPCDRC_MACOS_CACHE_HACK)
+				{
+					UML_MOV(block, mem(&m_core->param0), mem(&m_core->tempaddr));   // mov     [param0],[tempaddr]
+					UML_CALLC(block, cfunc_ppccom_dcbz_check, this);                // callc   ppccom_dcbz_check,ppc
+					UML_CMP(block, mem(&m_core->param1), 0);                        // cmp     [param1],0
+					UML_JMPc(block, COND_E, skip);                                  // je      skip
+				}
+				for (item = 0; item < m_cache_line_size / 8; item++)
+				{
+					UML_ADD(block, I0, mem(&m_core->tempaddr), 8 * item);           // add     i0,[tempaddr],8*item
+					UML_DMOV(block, I1, 0);                                         // dmov    i1,0
+					UML_CALLH(block, *m_write64[m_core->mode]);                     // callh   write64
+				}
+				UML_LABEL(block, skip);                                         // skip:
 			}
 			return true;
 
@@ -3782,7 +4189,7 @@ bool ppc_device::generate_instruction_1f(drcuml_block &block, compiler_state *co
 			return true;
 
 		case 0x172:  // TLBIA
-			UML_CALLC(block, cfunc_ppccom_execute_tlbia, this);                 // callc   ppccom_execute_tlbia,ppc
+			UML_CALLC(block, cfunc_ppccom_execute_tlbia, this);                // callc   ppccom_execute_tlbia,ppc
 			return true;
 
 		case 0x3d2:  // TLBLD
@@ -3880,64 +4287,66 @@ bool ppc_device::generate_instruction_1f(drcuml_block &block, compiler_state *co
 
 		case 0x092:  // MTMSR
 			if (m_cap & PPCCAP_603_MMU)
-				UML_XOR(block, I0, MSR32, R32(G_RS(op)));                               // xor     i0,msr32,rs
-			UML_MOV(block, MSR32, R32(G_RS(op)));                                           // mov     msr,rs
+				UML_XOR(block, I0, MSR32, R32(G_RS(op)));                       // xor     i0,msr32,rs
+			UML_MOV(block, MSR32, R32(G_RS(op)));                               // mov     msr,rs
 			if (m_cap & PPCCAP_603_MMU)
 			{
-				UML_TEST(block, I0, MSR603_TGPR);                                   // test    i0,tgpr
-				UML_CALLHc(block, COND_NZ, *m_swap_tgpr);                          // callh   swap_tgpr,nz
+				UML_TEST(block, I0, MSR603_TGPR);                               // test    i0,tgpr
+				UML_CALLHc(block, COND_NZ, *m_swap_tgpr);                       // callh   swap_tgpr,nz
 			}
-			generate_update_mode(block);                                               // <update mode>
-			compiler->checkints = true;                                                // mtmsr can enable MSR[EE] so recheck pending interrupts
+			generate_update_mode(block);                                        // <update mode>
+			compiler->checkints = true;                                         // mtmsr can enable MSR[EE] so recheck pending interrupts
 			return true;
 
 		case 0x1d3:  // MTSPR
 		{
 			uint32_t spr = compute_spr(G_SPR(op));
 			if (spr == SPR_LR || spr == SPR_CTR || (spr >= SPROEA_SPRG0 && spr <= SPROEA_SPRG3))
-				UML_MOV(block, SPR32(spr), R32(G_RS(op)));                                  // mov     spr,rs
+				UML_MOV(block, SPR32(spr), R32(G_RS(op)));                      // mov     spr,rs
 			else if (spr == SPR_XER)
 			{
-				UML_AND(block, SPR32(spr), R32(G_RS(op)), ~XER_SO);                 // and     spr,rs,~XER_SO
-				UML_SHR(block, XERSO32, R32(G_RS(op)), 31);                         // shr     [xerso],rs,31
+				UML_AND(block, SPR32(spr), R32(G_RS(op)), ~XER_SO);             // and     spr,rs,~XER_SO
+				UML_SHR(block, XERSO32, R32(G_RS(op)), 31);                     // shr     [xerso],rs,31
 			}
 			else if (spr == SPROEA_PVR)
-				;                                                                           // read only
+				;                                                               // read only
 			else
 			{
-				generate_update_cycles(block, compiler, desc->pc, false);           // <update cycles>
-				UML_MOV(block, mem(&m_core->param0), spr);                             // mov     [param0],spr
-				UML_MOV(block, mem(&m_core->param1), R32(G_RS(op)));                           // mov     [param1],rs
-				UML_CALLC(block, cfunc_ppccom_execute_mtspr, this);                                // callc   ppccom_execute_mtspr,ppc
+				generate_update_cycles(block, compiler, desc->pc, false);       // <update cycles>
+				UML_MOV(block, mem(&m_core->param0), spr);                      // mov     [param0],spr
+				UML_MOV(block, mem(&m_core->param1), R32(G_RS(op)));            // mov     [param1],rs
+				UML_CALLC(block, cfunc_ppccom_execute_mtspr, this);             // callc   ppccom_execute_mtspr,ppc
 				if (spr == SPR603_HID0 && m_flavor == PPC_MODEL_601)
 				{
 					// the little endian mode bit is in HID0 on PPC601;
 					// thus, update mode for that scenario in case HID0_LM changed
-					generate_update_mode(block);                               // <update mode>
+					generate_update_mode(block);                                // <update mode>
 				}
 				compiler->checkints = true;
-				generate_update_cycles(block, compiler, desc->pc + 4, true);       // <update cycles>
+				generate_update_cycles(block, compiler, desc->pc + 4, true);    // <update cycles>
 			}
 			return true;
 		}
 
 		case 0x0d2:  // MTSR
-			UML_MOV(block, SR32(G_SR(op)), R32(G_RS(op)));                                  // mov     sr[G_SR],rs
-			UML_CALLC(block, cfunc_ppccom_tlb_flush, this);                                        // callc   ppccom_tlb_flush,ppc
+			UML_MOV(block, mem(&m_core->param0), G_SR(op));                     // mov     [param0],G_SR
+			UML_MOV(block, mem(&m_core->param1), R32(G_RS(op)));                // mov     [param1],rs
+			UML_CALLC(block, cfunc_ppccom_execute_mtsr, this);                  // callc   ppccom_execute_mtsr,ppc
 			return true;
 
 		case 0x0f2:  // MTSRIN
 			UML_SHR(block, I0, R32(G_RB(op)), 28);                              // shr     i0,G_RB,28
-			UML_STORE(block, &m_core->sr[0], I0, R32(G_RS(op)), SIZE_DWORD, SCALE_x4); // store   sr,i0,rs,dword
-			UML_CALLC(block, cfunc_ppccom_tlb_flush, this);                            // callc   ppccom_tlb_flush,ppc
+			UML_MOV(block, mem(&m_core->param0), I0);                           // mov     [param0],i0
+			UML_MOV(block, mem(&m_core->param1), R32(G_RS(op)));                // mov     [param1],rs
+			UML_CALLC(block, cfunc_ppccom_execute_mtsr, this);                  // callc   ppccom_execute_mtsr,ppc
 			return true;
 
 		case 0x200:  // MCRXR
-			UML_ROLAND(block, I0, SPR32(SPR_XER), 4, 0x0f);                    // roland  i0,[xer],4,0x0f
+			UML_ROLAND(block, I0, SPR32(SPR_XER), 4, 0x0f);                     // roland  i0,[xer],4,0x0f
 			UML_SHL(block, I1, XERSO32, 3);                                     // shl     i1,[xerso],3
-			UML_OR(block, CR32(G_CRFD(op)), I0, I1);                                // or      [crd],i0,i1
-			UML_AND(block, SPR32(SPR_XER), SPR32(SPR_XER), ~0xf0000000);                // and     [xer],[xer],~0xf0000000
-			UML_MOV(block, XERSO32, 0);                                             // mov     [xerso],0
+			UML_OR(block, CR32(G_CRFD(op)), I0, I1);                            // or      [crd],i0,i1
+			UML_AND(block, SPR32(SPR_XER), SPR32(SPR_XER), ~0xf0000000);        // and     [xer],[xer],~0xf0000000
+			UML_MOV(block, XERSO32, 0);                                         // mov     [xerso],0
 			return true;
 
 		case 0x106:  // ICBT
@@ -3950,17 +4359,17 @@ bool ppc_device::generate_instruction_1f(drcuml_block &block, compiler_state *co
 		case 0x1e6:  // DCREAD
 		case 0x3e6:  // ICREAD
 			assert(m_cap & PPCCAP_4XX);
-			UML_MOV(block, R32(G_RT(op)), 0);                                           // mov     rt,0
+			UML_MOV(block, R32(G_RT(op)), 0);                                   // mov     rt,0
 			return true;
 
 		case 0x143:  // MFDCR
 		{
 			uint32_t spr = compute_spr(G_SPR(op));
 			assert(m_cap & PPCCAP_4XX);
-			generate_update_cycles(block, compiler, desc->pc, false);               // <update cycles>
-			UML_MOV(block, mem(&m_core->param0), spr);                                 // mov     [param0],spr
-			UML_CALLC(block, cfunc_ppccom_execute_mfdcr, this);                                    // callc   ppccom_execute_mfdcr,ppc
-			UML_MOV(block, R32(G_RD(op)), mem(&m_core->param1));                               // mov     rd,[param1]
+			generate_update_cycles(block, compiler, desc->pc, false);           // <update cycles>
+			UML_MOV(block, mem(&m_core->param0), spr);                          // mov     [param0],spr
+			UML_CALLC(block, cfunc_ppccom_execute_mfdcr, this);                 // callc   ppccom_execute_mfdcr,ppc
+			UML_MOV(block, R32(G_RD(op)), mem(&m_core->param1));                // mov     rd,[param1]
 			return true;
 		}
 
@@ -3968,12 +4377,12 @@ bool ppc_device::generate_instruction_1f(drcuml_block &block, compiler_state *co
 		{
 			uint32_t spr = compute_spr(G_SPR(op));
 			assert(m_cap & PPCCAP_4XX);
-			generate_update_cycles(block, compiler, desc->pc, false);               // <update cycles>
-			UML_MOV(block, mem(&m_core->param0), spr);                                 // mov     [param0],spr
-			UML_MOV(block, mem(&m_core->param1), R32(G_RS(op)));                               // mov     [param1],rs
-			UML_CALLC(block, cfunc_ppccom_execute_mtdcr, this);                                    // callc   ppccom_execute_mtdcr,ppc
+			generate_update_cycles(block, compiler, desc->pc, false);           // <update cycles>
+			UML_MOV(block, mem(&m_core->param0), spr);                          // mov     [param0],spr
+			UML_MOV(block, mem(&m_core->param1), R32(G_RS(op)));                // mov     [param1],rs
+			UML_CALLC(block, cfunc_ppccom_execute_mtdcr, this);                 // callc   ppccom_execute_mtdcr,ppc
 			compiler->checkints = true;
-			generate_update_cycles(block, compiler, desc->pc + 4, true);           // <update cycles>
+			generate_update_cycles(block, compiler, desc->pc + 4, true);        // <update cycles>
 			return true;
 		}
 
@@ -3981,7 +4390,7 @@ bool ppc_device::generate_instruction_1f(drcuml_block &block, compiler_state *co
 			assert(m_cap & PPCCAP_4XX);
 			UML_ROLINS(block, MSR32, R32(G_RS(op)), 0, MSR_EE);                 // rolins  msr,rs,0,MSR_EE
 			compiler->checkints = true;
-			generate_update_cycles(block, compiler, desc->pc + 4, true);           // <update cycles>
+			generate_update_cycles(block, compiler, desc->pc + 4, true);        // <update cycles>
 			return true;
 
 		case 0x0a3:  // WRTEEI

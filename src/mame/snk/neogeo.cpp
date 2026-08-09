@@ -1938,7 +1938,7 @@ void neogeo_base_state::neogeo_base(machine_config &config)
 	/* video hardware */
 	config.set_default_layout(layout_neogeo);
 
-	SCREEN(config, m_screen, SCREEN_TYPE_RASTER);
+	SCREEN(config, m_screen);
 	m_screen->set_raw(NEOGEO_PIXEL_CLOCK, NEOGEO_HTOTAL, NEOGEO_HBEND, NEOGEO_HBSTART, NEOGEO_VTOTAL, NEOGEO_VBEND, NEOGEO_VBSTART);
 	m_screen->set_screen_update(FUNC(neogeo_base_state::screen_update));
 
@@ -12126,9 +12126,9 @@ GAME( 1997, miexchng,   neogeo,   neobase,   neogeo,    mvs_led_state, empty_ini
 GAME( 1997, dragonsh,   neogeo,   neobase,   neogeo,    mvs_led_state, empty_init, ROT0, "Face", "Dragon's Heaven (development board)", MACHINE_IS_INCOMPLETE | MACHINE_NO_SOUND | MACHINE_SUPPORTS_SAVE ) // same ID code as Voltage Fighter Gowkaizer, developed by ex-Technos staff
 
 // Hudson Soft
-GAME( 1994, panicbom,   neogeo,   neobase,   neogeo,    mvs_led_state, empty_init, ROT0, "Eighting / Hudson", "Panic Bomber", MACHINE_SUPPORTS_SAVE )
-GAME( 1995, kabukikl,   neogeo,   neobase,   neogeo,    mvs_led_state, empty_init, ROT0, "Hudson", "Far East of Eden - Kabuki Klash / Tengai Makyou - Shin Den", MACHINE_SUPPORTS_SAVE )
-GAME( 1997, neobombe,   neogeo,   neobase,   neogeo,    mvs_led_state, empty_init, ROT0, "Hudson", "Neo Bomberman", MACHINE_SUPPORTS_SAVE )
+GAME( 1994, panicbom,   neogeo,   neobase,   neogeo,    mvs_led_state, empty_init, ROT0, "Eighting / Hudson Soft", "Panic Bomber", MACHINE_SUPPORTS_SAVE )
+GAME( 1995, kabukikl,   neogeo,   neobase,   neogeo,    mvs_led_state, empty_init, ROT0, "Hudson Soft", "Far East of Eden - Kabuki Klash / Tengai Makyou - Shin Den", MACHINE_SUPPORTS_SAVE )
+GAME( 1997, neobombe,   neogeo,   neobase,   neogeo,    mvs_led_state, empty_init, ROT0, "Hudson Soft", "Neo Bomberman", MACHINE_SUPPORTS_SAVE )
 
 // Monolith Corp.
 GAME( 1990, minasan,    neogeo,   neogeo_mj, neogeo_mj, mvs_led_state, empty_init, ROT0, "Monolith Corp.", "Minasan no Okagesamadesu! Dai Sugoroku Taikai (MOM-001 ~ MOH-001)", MACHINE_SUPPORTS_SAVE )
