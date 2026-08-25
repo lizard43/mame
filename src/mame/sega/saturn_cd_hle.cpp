@@ -24,12 +24,9 @@
 ===================================================================================================
 
 TODO:
-- finish off code cleanups (repetition etc.);
-- improve debugging;
-- fix DRQ behaviour, several softwares gets to the point of filling
-  the buffer (and probably don't know what to do);
-- fix startup, cfr. cdblock branch;
-- merge common components with lle version via superclass (i.e. comms);
+- fix DRDY behaviour, several softwares gets to the point of filling the buffer
+  (and probably don't know what to do);
+- fix startup not really reading the initial ID setup in device_reset, cfr. cdblock branch;
 - derive MPEG commands in a subdevice;
 - startup with NODISC/OPEN states currently takes a bit too much wall clock time
   (should be rather instant not take ~14 seconds);
@@ -54,6 +51,7 @@ DASM notes:
 #define LOG_SEEK           (1U << 3)
 #define LOG_XFER           (1U << 4)
 #define LOG_STATUS         (1U << 5) // log CD status changes
+#define LOG_CMDV           (1U << 6) // raw command output (verbose)
 
 #define VERBOSE (LOG_CMD | LOG_WARN | LOG_STATUS)
 //#define LOG_OUTPUT_FUNC osd_printf_info
@@ -65,6 +63,7 @@ DASM notes:
 #define LOGSEEK(...)         LOGMASKED(LOG_SEEK, __VA_ARGS__)
 #define LOGXFER(...)         LOGMASKED(LOG_XFER, __VA_ARGS__)
 #define LOGSTATUS(...)       LOGMASKED(LOG_STATUS, __VA_ARGS__)
+#define LOGCMDV(...)         LOGMASKED(LOG_CMDV, __VA_ARGS__)
 
 #define LIVE_CD_VIEW    0
 
@@ -147,11 +146,6 @@ void saturn_cd_hle_device::device_start()
 	save_item(NAME(cr2));
 	save_item(NAME(cr3));
 	save_item(NAME(cr4));
-	save_item(NAME(prev_cr1));
-	save_item(NAME(prev_cr2));
-	save_item(NAME(prev_cr3));
-	save_item(NAME(prev_cr4));
-	save_item(NAME(status_type));
 	save_item(NAME(hirqmask));
 	save_item(NAME(hirqreg));
 	save_item(NAME(cd_stat));
@@ -274,9 +268,9 @@ void saturn_cd_hle_device::amap(address_map &map)
 	map(0x80020, 0x80023).mirror(0x18000).rw(FUNC(saturn_cd_hle_device::dr3_r), FUNC(saturn_cd_hle_device::cr3_w));
 	map(0x80024, 0x80027).mirror(0x18000).rw(FUNC(saturn_cd_hle_device::dr4_r), FUNC(saturn_cd_hle_device::cr4_w));
 
-	// NetLink access
+	// NetLink/ Sega Saturn modem access
 	// dragndrm expects this value, most likely for status
-	// TODO: move out of here
+	// TODO: move out of here, breaks daytoncej boot
 	map(0x85029, 0x85029).lr8(NAME([] () -> u8 { return 0x11; }));
 }
 
@@ -534,7 +528,8 @@ void saturn_cd_hle_device::hirq_w(uint16_t data) { hirqreg &= data; }
 // TODO: these two are actually never read or written to by host?
 uint16_t saturn_cd_hle_device::hirqmask_r()
 {
-	LOGWARN("RW HIRM: %04x\n", hirqmask);
+	if (!machine().side_effects_disabled())
+		LOGWARN("RW HIRM: %04x\n", hirqmask);
 	return hirqmask;
 }
 
@@ -687,16 +682,7 @@ void saturn_cd_hle_device::cmd_get_status()
 {
 	//LOGCMD("%s: Get Status\n", machine().describe_context();
 	hirqreg |= CMOK;
-	if(status_type == 0)
-		cr_standard_return(cd_stat);
-	else
-	{
-		cr1 = (cd_stat) | (prev_cr1 & 0xff);
-		cr2 = prev_cr2;
-		cr3 = prev_cr3;
-		cr4 = prev_cr4;
-		status_type = 0; /* Road Blaster and friends needs this otherwise they won't boot. */
-	}
+	cr_standard_return(cd_stat);
 	//LOG("   = %04x %04x %04x %04x %04x\n", hirqreg, cr1, cr2, cr3, cr4);
 }
 
@@ -708,21 +694,21 @@ void saturn_cd_hle_device::cmd_get_hw_info()
 	cr2 = 0x0201;
 	cr3 = 0x0000;
 	cr4 = 0x0400;
-	status_type = 0;
 }
 
 void saturn_cd_hle_device::cmd_get_toc()
 {
 	LOGCMD("%s: Get TOC\n", machine().describe_context());
 	cd_readTOC();
-	cd_stat = CD_STAT_TRANS | CD_STAT_PAUSE;
+	// nope, hisspach wants just the DTREQ, otherwise hangs at Sega logo
+	//cd_stat = CD_STAT_TRANS | CD_STAT_PAUSE;
+	cd_stat |= CD_STAT_TRANS;
 	cr1 = cd_stat;
 	cr2 = 102*2;    // TOC length in words (102 entries @ 2 words/4bytes each)
 	cr3 = 0;
 	cr4 = 0;
 	xferdnum = 0;
 	hirqreg |= (CMOK|DRDY);
-	status_type = 0;
 }
 
 void saturn_cd_hle_device::cmd_get_session_info()
@@ -764,7 +750,6 @@ void saturn_cd_hle_device::cmd_get_session_info()
 	}
 
 	hirqreg |= (CMOK);
-	status_type = 0;
 }
 
 void saturn_cd_hle_device::cmd_init_cdsystem()
@@ -819,7 +804,6 @@ void saturn_cd_hle_device::cmd_init_cdsystem()
 	// TODO: ESEL happens at the end of the actual reset phase
 	hirqreg |= (CMOK | ESEL | EFLS | ECPY | EHST);
 	cr_standard_return(cd_stat);
-	status_type = 0;
 }
 
 void saturn_cd_hle_device::cmd_end_data_transfer()
@@ -896,7 +880,6 @@ void saturn_cd_hle_device::cmd_end_data_transfer()
 	hirqreg |= CMOK;
 
 	LOGXFER("\t%04x %04x %04x %04x %04x\n", hirqreg, cr1, cr2, cr3, cr4);
-	status_type = 1;
 }
 
 void saturn_cd_hle_device::cmd_play_disc()
@@ -980,7 +963,11 @@ void saturn_cd_hle_device::cmd_play_disc()
 				else
 					fadstoplay = (m_cdrom_image->get_track_start((end_pos & 0xff00) >> 8)) - cd_curfad;
 			}
-			LOGCMD("\ttrack mode %08x %08x\n", cd_curfad, fadstoplay);
+			LOGCMD("\ttrack mode %08x %08x -> %08x %08x\n", start_pos, end_pos, cd_curfad, fadstoplay);
+			// make sure to SEEK anyway:
+			// - Multiplayer Audio CD would otherwise override a previous track seek command
+			cd_change_status(CD_STAT_SEEK);
+			cd_seek_stat = CD_STAT_PLAY;
 		}
 		else
 		{
@@ -993,15 +980,20 @@ void saturn_cd_hle_device::cmd_play_disc()
 			// be countless possible combinations ...
 			if(fadstoplay == 0)
 			{
-				cd_curfad = m_cdrom_image->get_track_start(cur_track-1);
-				fadstoplay = m_cdrom_image->get_track_start(cur_track) - cd_curfad;
-				cd_change_status(CD_STAT_PLAY);
+				// don't override FAD start, Multiplayer Audio CD needs this
+				// (testable by pausing then play again current track)
+				// TODO: need to preserve previous fadstoplay
+				// (in said case, by playing until the end of disc rather than just one track)
+				//cd_curfad = m_cdrom_image->get_track_start(cur_track);
+				fadstoplay = m_cdrom_image->get_track_start(cur_track + 1) - cd_curfad;
+				cd_change_status(CD_STAT_SEEK);
+				cd_seek_stat = CD_STAT_PLAY;
 			}
-			LOGCMD("\ttrack resume %08x %08x\n",cd_curfad,fadstoplay);
+			LOGCMD("\ttrack resume %08x %08x (%06x %06x)\n", cd_curfad, fadstoplay, start_pos, end_pos);
 		}
 	}
 
-	LOGCMD("\tPlay Disc: start %x length %x\n", cd_curfad, fadstoplay);
+	LOGCMD("\tPlay Disc: current %06x -> start %06x length %06x\n", cd_curfad, cd_fad_seek, fadstoplay);
 
 	cr_standard_return(cd_stat);
 	hirqreg |= (CMOK);
@@ -1022,7 +1014,6 @@ void saturn_cd_hle_device::cmd_play_disc()
 		cdda_maxrepeat = 0;
 
 	cdda_repeat_count = 0;
-	status_type = 0;
 }
 
 void saturn_cd_hle_device::cmd_seek_disc()
@@ -1036,7 +1027,7 @@ void saturn_cd_hle_device::cmd_seek_disc()
 	playtype = 0;
 
 	LOGCMD("%s: Disc seek\n",   machine().describe_context());
-	LOGCMD("\t%08x %08x %08x %08x\n",cr1,cr2,cr3,cr4);
+	LOGCMD("\t%04x %04x %04x %04x\n",cr1, cr2, cr3, cr4);
 	if (cr1 & 0x80)
 	{
 		temp = (cr1 & 0xff) << 16;  // get FAD to seek to
@@ -1068,7 +1059,7 @@ void saturn_cd_hle_device::cmd_seek_disc()
 		}
 		else
 		{
-			// Area 51 sets this up (TODO: re 	test me out)
+			// Area 51 sets this up (TODO: retest me out)
 			cd_fad_seek = ((cr1 & 0x7f) << 16) | cr2;
 			cd_change_status(CD_STAT_SEEK);
 			cd_seek_stat = CD_STAT_PAUSE;
@@ -1100,19 +1091,21 @@ void saturn_cd_hle_device::cmd_seek_disc()
 
 	hirqreg |= CMOK;
 	cr_standard_return(cd_stat);
-	status_type = 0;
 }
 
 void saturn_cd_hle_device::cmd_ffwd_rew_disc()
 {
 	// FFWD / REW
 	// cr1 bit 0 determines if this is a Fast Forward (0) or a Rewind (1) command
-	// TODO: unemulated, can be triggered thru BIOS player
+	// TODO: unemulated, can be triggered thru Multiplayer by holding on relevant keys
 	// ...
 }
 
 void saturn_cd_hle_device::cmd_get_subcode_q_rw_channel()
 {
+	// untested, assume it should set DTREQ
+	cd_stat |= CD_STAT_TRANS;
+	cd_stat &= 0xff00;
 	// Get SubCode Q / RW Channel
 	switch(cr1 & 0xff)
 	{
@@ -1140,8 +1133,8 @@ void saturn_cd_hle_device::cmd_get_subcode_q_rw_channel()
 			xxxx xxxx [7] Absolute M
 			xxxx xxxx [8] Absolute S
 			xxxx xxxx [9] Absolute F
-			xxxx xxxx [10] CRCC
-			xxxx xxxx [11] CRCC
+			xxxx xxxx [10] CRCC - (omitted in this implementation)
+			xxxx xxxx [11] CRCC /
 			*/
 
 			msf_abs = cdrom_file::lba_to_msf_alt( cd_curfad - 150 );
@@ -1160,7 +1153,6 @@ void saturn_cd_hle_device::cmd_get_subcode_q_rw_channel()
 			subqbuf[7] = dec_2_bcd((msf_abs >> 16) & 0xff);
 			subqbuf[8] = dec_2_bcd((msf_abs >> 8) & 0xff);
 			subqbuf[9] = dec_2_bcd((msf_abs >> 0) & 0xff);
-			// TODO: CRCC calculation, we are short of 2 bytes here.
 		}
 		break;
 
@@ -1177,19 +1169,16 @@ void saturn_cd_hle_device::cmd_get_subcode_q_rw_channel()
 			{
 				int i;
 
-				for(i=0;i<12*2;i++)
-					subrwbuf[i] = 0;
+				for(i = 0; i < 12 * 2; i++)
+					subrwbuf[i] = 0xff;
 			}
 			break;
 	}
 	hirqreg |= CMOK|DRDY;
-	status_type = 0;
-	//cr_standard_return(cd_stat);
 }
 
 void saturn_cd_hle_device::cmd_set_cddevice_connection()
 {
-	// Set CD Device connection
 	uint8_t param;
 
 	// get operation
@@ -1199,6 +1188,7 @@ void saturn_cd_hle_device::cmd_set_cddevice_connection()
 
 	cddevicenum = param;
 
+	// a param of 0xff disconnects
 	if (param == 0xff)
 	{
 		cddevice = (filterT *)nullptr;
@@ -1209,11 +1199,15 @@ void saturn_cd_hle_device::cmd_set_cddevice_connection()
 		{
 			cddevice = &filters[param];
 		}
+		else
+		{
+			// TODO: should just require a rejection
+			popmessage("saturn_cd_hle.cpp: cmd_set_cddevice_connection() with param %02x", param);
+		}
 	}
 
 	hirqreg |= (CMOK|ESEL);
 	cr_standard_return(cd_stat);
-	status_type = 0;
 }
 
 void saturn_cd_hle_device::cmd_get_cddevice_connection()
@@ -1230,18 +1224,15 @@ void saturn_cd_hle_device::cmd_get_cddevice_connection()
 
 void saturn_cd_hle_device::cmd_last_buffer_destination()
 {
-	// Last Buffer Destination
 	cr1 = cd_stat | 0;
 	cr2 = 0;
 	cr3 = lastbuf << 8;
 	cr4 = 0;
 	hirqreg |= (CMOK);
-	status_type = 0;
 }
 
 void saturn_cd_hle_device::cmd_set_filter_range()
 {
-	// Set Filter Range
 	// cr1 low + cr2 = FAD0, cr3 low + cr4 = FAD1
 	// cr3 hi = filter num.
 	uint8_t fnum = (cr3 >> 8) & 0xff;
@@ -1255,18 +1246,16 @@ void saturn_cd_hle_device::cmd_set_filter_range()
 
 	hirqreg |= (CMOK|ESEL);
 	cr_standard_return(cd_stat);
-	status_type = 0;
 }
 
 void saturn_cd_hle_device::cmd_get_filter_range()
 {
-	popmessage("Get Filter Range");
+	popmessage("saturn_cd_hle.cpp: cmd_get_filter_range() (unemulated)");
 	hirqreg |= CMOK;
 }
 
 void saturn_cd_hle_device::cmd_set_filter_subheader_conditions()
 {
-	// Set Filter Subheader conditions
 	uint8_t fnum = (cr3 >> 8) & 0xff;
 
 	LOGCMD("%s: Set Filter Subheader conditions %x => chan %x masks %x fid %x vals %x\n", machine().describe_context(), fnum, cr1 & 0xff, cr2, cr3 & 0xff, cr4);
@@ -1280,7 +1269,6 @@ void saturn_cd_hle_device::cmd_set_filter_subheader_conditions()
 
 	hirqreg |= (CMOK|ESEL);
 	cr_standard_return(cd_stat);
-	status_type = 0;
 }
 
 
@@ -1289,7 +1277,7 @@ void saturn_cd_hle_device::cmd_get_filter_subheader_conditions()
 	// Get Filter Subheader conditions
 	uint8_t fnum = (cr3 >> 8) & 0xff;
 
-	LOGCMD("%s: Set Filter Subheader conditions %x => chan %x masks %x fid %x vals %x\n", machine().describe_context(), fnum, cr1 & 0xff, cr2, cr3 & 0xff, cr4);
+	LOGCMD("%s: Get Filter Subheader conditions %x => chan %x masks %x fid %x vals %x\n", machine().describe_context(), fnum, cr1 & 0xff, cr2, cr3 & 0xff, cr4);
 
 	cr1 = cd_stat | (filters[fnum].chan & 0xff);
 	cr2 = (filters[fnum].smmask << 8) | (filters[fnum].cimask & 0xff);
@@ -1297,7 +1285,6 @@ void saturn_cd_hle_device::cmd_get_filter_subheader_conditions()
 	cr4 = (filters[fnum].smval << 8) | (filters[fnum].cival & 0xff);
 
 	hirqreg |= (CMOK|ESEL);
-	status_type = 0;
 }
 
 void saturn_cd_hle_device::cmd_set_filter_mode()
@@ -1319,13 +1306,13 @@ void saturn_cd_hle_device::cmd_set_filter_mode()
 	LOGCMD("%s: Set Filter Mode filt %x mode %x\n", machine().describe_context(), fnum, mode);
 	hirqreg |= (CMOK|ESEL);
 	cr_standard_return(cd_stat);
-	status_type = 0;
 }
 
 void saturn_cd_hle_device::cmd_get_filter_mode()
 {
-	// Get Filter Mode
 	uint8_t fnum = (cr3 >> 8) & 0xff;
+
+	LOGCMD("%s: Get Filter Mode fnum %x\n", machine().describe_context(), fnum);
 
 	cr1 = cd_stat | (filters[fnum].mode & 0xff);
 	cr2 = 0;
@@ -1333,7 +1320,6 @@ void saturn_cd_hle_device::cmd_get_filter_mode()
 	cr4 = 0;
 
 	hirqreg |= (CMOK|ESEL);
-	status_type = 0;
 }
 
 void saturn_cd_hle_device::cmd_set_filter_connection()
@@ -1353,7 +1339,6 @@ void saturn_cd_hle_device::cmd_set_filter_connection()
 
 	hirqreg |= (CMOK|ESEL);
 	cr_standard_return(cd_stat);
-	status_type = 0;
 }
 
 void saturn_cd_hle_device::cmd_reset_selector()
@@ -1388,7 +1373,6 @@ void saturn_cd_hle_device::cmd_reset_selector()
 
 		hirqreg |= (CMOK|ESEL);
 		cr_standard_return(cd_stat);
-		status_type = 0;
 		return;
 	}
 
@@ -1463,7 +1447,6 @@ void saturn_cd_hle_device::cmd_reset_selector()
 
 	hirqreg |= (CMOK|ESEL);
 	cr_standard_return(cd_stat);
-	status_type = 0;
 }
 
 void saturn_cd_hle_device::cmd_get_buffer_size()
@@ -1473,9 +1456,8 @@ void saturn_cd_hle_device::cmd_get_buffer_size()
 	cr2 = (freeblocks > MAX_BLOCKS) ? MAX_BLOCKS : freeblocks;
 	cr3 = 0x1800;
 	cr4 = 200;
-	LOG("Get Buffer Size = %d\n", cr2);
+	LOGCMD("%s: Get Buffer Size = %d\n", machine().describe_context(), cr2);
 	hirqreg |= (CMOK);
-	status_type = 0;
 }
 
 void saturn_cd_hle_device::cmd_get_buffer_partition_sector_number()
@@ -1505,7 +1487,6 @@ void saturn_cd_hle_device::cmd_get_buffer_partition_sector_number()
 
 	//LOGWARN("%04x\n",cr4);
 	hirqreg |= (CMOK);
-	status_type = 1;
 }
 
 void saturn_cd_hle_device::cmd_calculate_actual_data_size()
@@ -1533,19 +1514,17 @@ void saturn_cd_hle_device::cmd_calculate_actual_data_size()
 
 	hirqreg |= (CMOK|ESEL);
 	cr_standard_return(cd_stat);
-	status_type = 0;
 }
 
 void saturn_cd_hle_device::cmd_get_actual_data_size()
 {
 	// get actual block size
-	LOGCMD("%s: Get actual block size\n", machine().describe_context());
 	cr1 = cd_stat | ((calcsize >> 16) & 0xff);
 	cr2 = (calcsize & 0xffff);
 	cr3 = 0;
 	cr4 = 0;
+	LOGCMD("%s: Get actual block size %06x\n", machine().describe_context(), calcsize);
 	hirqreg |= (CMOK);
-	status_type = 1;
 }
 
 // falcom2
@@ -1569,8 +1548,6 @@ void saturn_cd_hle_device::cmd_get_sector_information()
 		cr4 = ((partitions[bufnum].blocks[sectoffs]->subm & 0xff) << 8) | (partitions[bufnum].blocks[sectoffs]->cinf & 0xff);
 		hirqreg |= (CMOK|ESEL);
 	}
-
-	status_type = 0;
 }
 
 void saturn_cd_hle_device::cmd_set_sector_length()
@@ -1611,7 +1588,6 @@ void saturn_cd_hle_device::cmd_set_sector_length()
 	}
 	hirqreg |= (CMOK|ESEL);
 	cr_standard_return(cd_stat);
-	status_type = 0;
 }
 
 void saturn_cd_hle_device::cmd_get_sector_data()
@@ -1654,7 +1630,6 @@ void saturn_cd_hle_device::cmd_get_sector_data()
 	cd_stat |= CD_STAT_TRANS;
 	cr_standard_return(cd_stat);
 	hirqreg |= (CMOK|EHST|DRDY);
-	status_type = 0;
 }
 
 void saturn_cd_hle_device::cmd_delete_sector_data()
@@ -1713,7 +1688,6 @@ void saturn_cd_hle_device::cmd_delete_sector_data()
 	cd_stat &= ~CD_STAT_TRANS;
 	cr_standard_return(cd_stat);
 	hirqreg |= (CMOK|EHST);
-	status_type = 0;
 }
 
 void saturn_cd_hle_device::cmd_get_and_delete_sector_data()
@@ -1760,7 +1734,6 @@ void saturn_cd_hle_device::cmd_get_and_delete_sector_data()
 	cd_stat |= CD_STAT_TRANS;
 	cr_standard_return(cd_stat);
 	hirqreg |= (CMOK|EHST|DRDY);
-	status_type = 0;
 }
 
 void saturn_cd_hle_device::cmd_put_sector_data()
@@ -1801,12 +1774,11 @@ void saturn_cd_hle_device::cmd_put_sector_data()
 
 	hirqreg |= (CMOK|DRDY);
 	cr_standard_return(cd_stat);
-	status_type = 0;
 }
 
 void saturn_cd_hle_device::cmd_move_sector_data()
 {
-	popmessage("Move Sector data");
+	popmessage("saturn_cd_hle.cpp: cmd_move_sector_data() (unemulated)");
 	hirqreg |= (CMOK);
 }
 
@@ -1843,20 +1815,17 @@ void saturn_cd_hle_device::cmd_copy_sector_data()
 
 	hirqreg |= (CMOK|ECPY);
 	cr_standard_return(cd_stat);
-	status_type = 0;
 }
 
 void saturn_cd_hle_device::cmd_get_sector_data_copy_or_move_error()
 {
 	// get copy error
 	LOGCMD("%s: Get copy error\n",   machine().describe_context());
-	logerror("Get copy error\n");
 	cr1 = cd_stat;
 	cr2 = 0;
 	cr3 = 0;
 	cr4 = 0;
 	hirqreg |= (CMOK);
-	status_type = 0;
 }
 
 void saturn_cd_hle_device::cmd_change_directory()
@@ -1871,7 +1840,6 @@ void saturn_cd_hle_device::cmd_change_directory()
 
 	read_new_dir(temp);
 	cr_standard_return(cd_stat);
-	status_type = 0;
 }
 
 void saturn_cd_hle_device::cmd_read_directory()
@@ -1892,7 +1860,6 @@ void saturn_cd_hle_device::cmd_read_directory()
 
 	cr_standard_return(cd_stat);
 	hirqreg |= (CMOK|EFLS);
-	status_type = 0;
 }
 
 void saturn_cd_hle_device::cmd_get_file_scope()
@@ -1905,7 +1872,6 @@ void saturn_cd_hle_device::cmd_get_file_scope()
 	cr3 = 0x0100;   // report directory held
 	cr4 = firstfile;    // first file id
 	LOGWARN("%04x %04x %04x %04x\n",cr1,cr2,cr3,cr4);
-	status_type = 0;
 }
 
 void saturn_cd_hle_device::cmd_get_target_file_info()
@@ -1966,7 +1932,6 @@ void saturn_cd_hle_device::cmd_get_target_file_info()
 		xfercount = 0;
 	}
 	LOG("   = %04x %04x %04x %04x %04x\n", hirqreg, cr1, cr2, cr3, cr4);
-	status_type = 0;
 }
 
 void saturn_cd_hle_device::cmd_read_file()
@@ -1995,7 +1960,6 @@ void saturn_cd_hle_device::cmd_read_file()
 	playtype = 1;
 
 	hirqreg |= (CMOK|EHST);
-	status_type = 0;
 }
 
 void saturn_cd_hle_device::cmd_abort_file()
@@ -2010,7 +1974,6 @@ void saturn_cd_hle_device::cmd_abort_file()
 		cd_change_status(CD_STAT_PAUSE); // force to pause
 
 	cr_standard_return(cd_stat);
-	status_type = 0;
 }
 
 void saturn_cd_hle_device::cmd_check_copy_protection()
@@ -2033,7 +1996,6 @@ void saturn_cd_hle_device::cmd_check_copy_protection()
 		hirqreg = 0x7c5;
 	}
 	cr_standard_return(cd_stat);
-	status_type = 0;
 }
 
 void saturn_cd_hle_device::cmd_get_disc_region()
@@ -2052,7 +2014,6 @@ void saturn_cd_hle_device::cmd_get_disc_region()
 	cr4 = 0;
 	hirqreg |= (CMOK);
 //  cr_standard_return(cd_stat);
-	status_type = 0;
 
 }
 
@@ -2124,7 +2085,7 @@ void saturn_cd_hle_device::cd_exec_command()
 		((cr1 & 0xff00) != 0x5200) &&
 		((cr1 & 0xff00) != 0x5300) &&
 		1)
-		logerror("Command exec %04x %04x %04x %04x %04x (stat %04x)\n", hirqreg, cr1, cr2, cr3, cr4, cd_stat);
+		LOGCMDV("Command exec %04x %04x %04x %04x %04x (stat %04x)\n", hirqreg, cr1, cr2, cr3, cr4, cd_stat);
 
 	// execute the command even if CD isn't in tray
 	// - BIOS will otherwise draw VDP2 garbage if tray is closed (seen commands: 0x01, 0x75, 0x67)
@@ -2198,18 +2159,10 @@ void saturn_cd_hle_device::cd_exec_command()
 
 		default:
 			LOG("Unknown command %04x\n", cr1>>8);
-			popmessage("CD Block unknown command %02x",cr1>>8);
+			popmessage("saturn_cd_hle.cpp: Unknown command %02x",cr1>>8);
 
 			hirqreg |= (CMOK);
 			break;
-	}
-
-	if(status_type == 1)
-	{
-		prev_cr1 = cr1;
-		prev_cr2 = cr2;
-		prev_cr3 = cr3;
-		prev_cr4 = cr4;
 	}
 }
 
@@ -2365,7 +2318,7 @@ void saturn_cd_hle_device::read_new_dir(uint32_t fileno)
 		while ((!foundpd) && (cfad < 200))
 		{
 			if(sectlenin != 2048)
-				popmessage("Sector Length %d (0)",sectlenin);
+				popmessage("saturn_cd_hle.cpp: read_new_dir with Sector Length %d (0)",sectlenin);
 
 			memset(sect, 0, 2048);
 			cd_readblock(cfad++, sect);
@@ -2442,7 +2395,7 @@ void saturn_cd_hle_device::make_dir_current(uint32_t fad)
 
 	memset(&sect[0], 0, MAX_DIR_SIZE);
 	if(sectlenin != 2048)
-		popmessage("Sector Length %d (1)",sectlenin);
+		popmessage("saturn_cd_hle.cpp: make_dir_current Sector Length %d (1)",sectlenin);
 
 	for (i = 0; i < (curroot.length/2048); i++)
 	{
@@ -2895,7 +2848,8 @@ void saturn_cd_hle_device::cd_playdata()
 			}
 			else
 			{
-				LOGSEEK("Ready\n");
+				cur_track = m_cdrom_image->get_track(cd_fad_seek);
+				LOGSEEK("Ready (track %d)\n", cur_track + 1);
 				cd_curfad = cd_fad_seek;
 				cd_change_status(cd_seek_stat);
 				if (cd_seek_stat == CD_STAT_PLAY && m_cdrom_image->get_track_type(m_cdrom_image->get_track(cd_curfad)) == cdrom_file::CD_TRACK_AUDIO)
@@ -2967,11 +2921,21 @@ void saturn_cd_hle_device::cd_playdata()
 							}
 							else
 							{
+								// a cdda_maxrepeat of 0xf means keep repeating same track indefinitely
 								if(cdda_repeat_count < 0xe)
 									cdda_repeat_count++;
 
-								cd_curfad = m_cdrom_image->get_track_start(cur_track-1) + 150;
-								fadstoplay = m_cdrom_image->get_track_start(cur_track) - cd_curfad;
+								// TODO: untested with cur_track == 0xaa (lead-out)
+								// - dendego (tries to) playback redbook track 3 on title screen after seek
+								// - girlpuz1 is an easy test case, on both title and Himekuri mode
+								// NOTE: cur_track is -1 at this point vs. redbook spec
+								assert(cur_track >= 0 && cur_track != 0xff);
+								//cd_curfad = m_cdrom_image->get_track_start(cur_track);
+								cd_fad_seek = m_cdrom_image->get_track_start(cur_track);
+								fadstoplay = m_cdrom_image->get_track_start(cur_track + 1) - cd_fad_seek;
+								cd_change_status(CD_STAT_SEEK);
+								cd_seek_stat = CD_STAT_PLAY;
+								LOGCMD("Repeat hit track %d count %d/%d FAD %06x -> start %06x end %06x\n", cur_track + 1, cdda_repeat_count, cdda_maxrepeat, cd_curfad, cd_fad_seek, fadstoplay);
 							}
 						}
 					}
