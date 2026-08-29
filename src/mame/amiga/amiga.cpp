@@ -653,8 +653,8 @@ protected:
 	required_device<zorro3_bus_device> m_zorro;
 
 private:
-	uint16_t ide_r(offs_t offset, uint16_t mem_mask);
-	void ide_w(offs_t offset, uint16_t data, uint16_t mem_mask);
+	uint16_t ide_r(offs_t offset);
+	void ide_w(offs_t offset, uint16_t data);
 	void ide_interrupt_w(int state);
 
 	uint32_t motherboard_r(offs_t offset, uint32_t mem_mask);
@@ -1554,7 +1554,7 @@ bool a4000_state::int6_pending()
 	return m_cia_1_irq || m_zorro_int6;
 }
 
-uint16_t a4000_state::ide_r(offs_t offset, uint16_t mem_mask)
+uint16_t a4000_state::ide_r(offs_t offset)
 {
 	// ide interrupt register
 	if (offset == 0x1010)
@@ -1562,12 +1562,12 @@ uint16_t a4000_state::ide_r(offs_t offset, uint16_t mem_mask)
 
 	// this very likely doesn't respond to all the addresses, figure out which ones
 	if (BIT(offset, 12))
-		return m_ata->cs1_swap_r((offset >> 1) & 0x07, mem_mask);
+		return m_ata->cs1_swap_r((offset >> 1) & 0x07);
 	else
-		return m_ata->cs0_swap_r((offset >> 1) & 0x07, mem_mask);
+		return m_ata->cs0_swap_r((offset >> 1) & 0x07);
 }
 
-void a4000_state::ide_w(offs_t offset, uint16_t data, uint16_t mem_mask)
+void a4000_state::ide_w(offs_t offset, uint16_t data)
 {
 	// ide interrupt register, read only
 	if (offset == 0x1010)
@@ -1575,9 +1575,9 @@ void a4000_state::ide_w(offs_t offset, uint16_t data, uint16_t mem_mask)
 
 	// this very likely doesn't respond to all the addresses, figure out which ones
 	if (BIT(offset, 12))
-		m_ata->cs1_swap_w((offset >> 1) & 0x07, data, mem_mask);
+		m_ata->cs1_swap_w((offset >> 1) & 0x07, data);
 	else
-		m_ata->cs0_swap_w((offset >> 1) & 0x07, data, mem_mask);
+		m_ata->cs0_swap_w((offset >> 1) & 0x07, data);
 }
 
 void a4000_state::ide_interrupt_w(int state)
@@ -2332,6 +2332,7 @@ void amiga_state::amiga_base(machine_config &config)
 	SOFTWARE_LIST(config, "flop_list").set_original("amiga_flop");
 	SOFTWARE_LIST(config, "ocs_list").set_original("amigaocs_flop");
 	SOFTWARE_LIST(config, "demos_list").set_original("amiga_demos");
+	SOFTWARE_LIST(config, "flop_generic_list").set_compatible("generic_flop_35").set_filter("amiga");
 	SOFTWARE_LIST(config, "amigacd_list").set_original("amiga_cd");
 	// CD32 should support this off the bat, Aminet Photo CD packages available anyway.
 	SOFTWARE_LIST(config, "photocd_list").set_compatible("photo_cd");
