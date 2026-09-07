@@ -1205,6 +1205,8 @@ ace1000
 albert
 am100
 am64
+a2lca2
+a2plca2
 apple2
 apple2jp
 apple2p
@@ -16904,6 +16906,7 @@ ap10
 ctk530
 ctk551
 ctk601
+ctk630
 gz70sp
 
 @source:casio/ctrc1.cpp
@@ -18413,6 +18416,7 @@ kotbinsp
 kotbinyo
 kotbinyosu
 mjchuuka
+mjchuukac
 mjdchuka
 mjflove
 mjgnight
@@ -18532,6 +18536,7 @@ realbrko
 
 @source:dynax/royalmah.cpp
 akamj
+akamja
 cafebrk
 cafedoll
 cafedollg
@@ -18544,6 +18549,7 @@ dragonmj
 dragonmj103
 ichiban
 ichiban235
+ichiban305
 ippatsu
 jangtaku
 janoh
@@ -18750,6 +18756,9 @@ advision
 
 @source:entex/sag.cpp
 sag
+
+@source:eolith/eoforce.cpp
+burnstrk
 
 @source:eolith/eolith.cpp
 candy
@@ -20201,6 +20210,7 @@ retro150a
 rhhc152
 supreme
 table108
+tchib158
 throwbck
 touma560
 touma568
@@ -20234,6 +20244,7 @@ gp3x788
 
 @source:handheld/generalplus_gpce4.cpp
 digicolr
+l2lelmo
 mapacman
 parcade
 siddr
@@ -20245,12 +20256,12 @@ taturtf
 tamameet
 
 @source:handheld/generalplus_gpl162xx_lcdtype.cpp
+bkid218
 pcp8718
 pcp8728
-bkid218
 
 @source:handheld/generalplus_gpl951xx.cpp
-fixitflx
+chiikawa
 bfdigdug
 bfgalaga
 bfmpac
@@ -20259,7 +20270,11 @@ bfspyhnt
 bftetris
 bubltea
 dsgnpal
+fixitflx
 flufflav
+kenshino
+pink218
+pixlstar
 pockrmsr
 pokebala
 pokeissh
@@ -20280,10 +20295,17 @@ segapet3
 segapet3a
 segaptdx
 smkcatch
+smkfrnd
 smkgacha
 smkguras
 smkgurasa
+tamasmrt
+tamasmrta
+teriermn
 wiwcs
+
+@source:handheld/gc71_nes_bootleg.cpp
+gc71hh
 
 @source:handheld/gmaster.cpp
 gmaster
@@ -20400,6 +20422,7 @@ tmbaskb
 atw_avbp
 atw_barb
 atw_batm
+atw_blue
 atw_dp
 atw_enc
 atw_fz
@@ -20829,6 +20852,9 @@ rztoshden
 
 @source:handheld/scrablex.cpp
 scrablex
+
+@source:handheld/sfc_nes_bootleg.cpp
+sfcnes
 
 @source:handheld/talkingbb.cpp
 talkingbb
@@ -21815,6 +21841,7 @@ lhb3
 lhbv33c
 nkishusp
 ryukobou
+sdmg2641c
 tygn
 vbowl
 vbowlhk
@@ -21829,6 +21856,7 @@ genius6
 genius6a
 genius6b
 happyskl
+hjdmg
 iqblocka
 iqblockf
 jking103a
@@ -26848,6 +26876,7 @@ turboex
 @source:leapfrog/leappad.cpp
 leappad
 leappadmic
+leappadw
 mfleappad
 ltleappad
 
@@ -26927,15 +26956,15 @@ jr200u
 kn5000
 
 @source:matsushita/kn7000.cpp
-kn6000
 kn2400
-kn2600                          // SX-KN2600, same firmware as SX-KN2400
+kn2600
+kn6000
 kn6500
 kn7000
 
 @source:matsushita/myb3k.cpp
-myb3k
 jb3000
+myb3k
 stepone
 
 @source:mattel/aquarius.cpp
@@ -29470,7 +29499,6 @@ rodent
 3do_gdo101
 3do_hc21
 3do_try
-3dobios
 alg3do
 md23do
 orbatak
@@ -32058,6 +32086,7 @@ h01jce
 
 @source:misc/haiwei.cpp
 hqdf
+unkhaiwei
 
 @source:misc/hapyfish.cpp
 hapyfsh2
@@ -33641,10 +33670,6 @@ vroulet
 @source:misc/whtm68k.cpp
 yizhix
 
-@source:misc/wildpkr.cpp
-tabpkr
-wildpkr
-
 @source:misc/winbingo.cpp
 wbingo06
 
@@ -35023,6 +35048,7 @@ pc9801vx
 pc286vs
 pc286u
 pc386m
+pc386v
 pc486se
 pc486mu
 
@@ -35361,6 +35387,7 @@ av2mj1bb
 av2mj2rg
 finalbny
 galkaika
+galkaikap
 galkoku
 galkokua
 hyouban
@@ -35426,6 +35453,7 @@ sexygal
 sgaltrop
 sgaltropa
 sweetgal
+sweetgala
 
 @source:nichibutsu/nyanpai.cpp
 4psimasy
@@ -35763,6 +35791,7 @@ zudugo
 @source:nintendo/nes_vt09.cpp
 cybar120
 dturbogt
+gampow50
 gujtv108
 joypad65
 lxplasma
@@ -35776,6 +35805,7 @@ msimm2
 msinamco
 msisinv
 msifrog
+pckarc50
 pumpactv
 rcapnp
 senario25
@@ -35818,14 +35848,20 @@ orb300
 retror30
 rminitv
 tvkunio1
+tvkunio2
+tvkunio3
 typo240
 
 @source:nintendo/nes_vt369_vtunknown.cpp
-36pcase
+100burgr
 168pcase
+200in1fn
 240in1ar
+36pcase
+500in1gf
 500in1hh
 a6plus
+asthh
 d12power
 d9_500
 denv150
@@ -35836,6 +35872,7 @@ dgun2593
 dvnimbus
 egame150
 f5_620
+fined200
 gb50_150
 gbox2020
 gcs2mgp
@@ -35851,6 +35888,7 @@ hkb502a
 jl1810gr
 jl2050
 jl2377
+jl2950
 lexi30
 lpgm240
 lxcap
@@ -35924,6 +35962,7 @@ unkra200
 urban240
 vibes240
 vibes240a
+vibes240e
 zl383
 zonefusn
 
@@ -35941,6 +35980,7 @@ gbox2022
 gprnrs1
 gprnrs16
 hhgc319
+jjfun365
 mc_7x6ss
 mc_8x6ss
 mc_9x6sa
@@ -39042,6 +39082,8 @@ whtforce
 @source:pinball/supstarf.cpp
 supstarf
 supstarfa
+supstarfb
+supstarfc
 
 @source:pinball/taito.cpp
 cavnegro
@@ -40320,6 +40362,7 @@ tr808
 tr909
 
 @source:roland/roland_u20.cpp
+u110
 u20
 u220
 
@@ -40566,6 +40609,7 @@ ddz2
 djddz
 jzuanshi
 pljh
+xy168
 
 @source:seequa/chameleon.cpp
 chameleon
@@ -40815,6 +40859,7 @@ twinktmb
 
 @source:sega/megadriv_firecore.cpp
 atgame40
+bfmk
 dcat16
 mahg156
 matet
@@ -43290,6 +43335,11 @@ x68ksupr
 x68kxvi
 
 @source:sharp/zaurus.cpp
+zmi10
+zmi310
+zmie1
+zmie21
+zmt300s
 zsl5500
 zslc500
 zsl5600
@@ -45355,6 +45405,7 @@ jgaoshou
 mtrain
 mtraina
 new2001
+ntrecity
 ptrain
 ptraina
 qbeebing
@@ -45383,6 +45434,7 @@ xtrain
 @source:success/big10.cpp
 big10
 big10a
+big10b
 
 @source:success/kurukuru.cpp
 kurukuru
@@ -45614,6 +45666,29 @@ alphatron
 
 @source:tab/tabe22.cpp
 tabe22
+
+@source:tabaustria/royalpkr.cpp
+csmarino
+csmarino020l
+eurodraw
+gmachine
+gmachine010m
+gmachine102m
+jollypk2
+jollypk2116l
+luckyfun
+royalpkr
+royalpkr152l
+royalpkr154l
+royalpkr170h
+royalpkr170l
+royalpkr185l
+royalpkr200l
+tripledr
+tripledr106l
+
+@source:tabaustria/wildpkr.cpp
+wildpkr
 
 @source:taito/2mindril.cpp
 2mindril
@@ -47754,6 +47829,7 @@ tsbuzz
 
 @source:tvgames/generalplus_gp327902.cpp
 chikawac
+dswitch
 fairicam
 smksagas
 smksagasa
@@ -47767,9 +47843,13 @@ tomyeggb
 mobigo
 mobigof
 mobigos
+mobigouk
+mobigouka
+mobigoukb
 
 @source:tvgames/generalplus_gpl16250_mobigo2.cpp
 mobigo2
+mobigo2g
 
 @source:tvgames/generalplus_gpl16250_nand.cpp
 beambox
@@ -47813,6 +47893,7 @@ myac220
 smartfp
 smartfpf
 smartfps
+tfmat
 tkmag220
 typo176
 
@@ -47962,6 +48043,7 @@ zonefamf
 
 @source:tvgames/spg29x_lexibook_jg7425.cpp
 dancef2p
+dbldance
 fundr200
 lx_aven
 lx_frozen
@@ -47993,6 +48075,7 @@ doraphonf
 doyousud
 dreamlss
 drumsups
+dvlaptop
 epo_tetr
 fordrace
 genitvp
@@ -48013,9 +48096,11 @@ lpetshop
 lxairjet
 lxspidaj
 mattelcs
+mgarage
 mpntball
 mpntbalt
 mylpony
+nvpoker
 ordentv
 pballpup
 pdcj
@@ -48030,6 +48115,7 @@ senspeed
 senwfit
 smartcyc
 spidm2
+stvscri
 swclone
 tiktokmm
 tmntbftc
@@ -48145,6 +48231,7 @@ disppal
 lexiseal
 lexizeus
 pokermor
+pokmax20
 vgcaplet
 vgcap35
 vsplus
@@ -48191,6 +48278,7 @@ cdlyoko
 dnv200fs
 m505neo
 m521neo
+movesyst
 mywicodx
 mywicogt
 oplayer
