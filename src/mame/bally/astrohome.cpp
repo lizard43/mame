@@ -104,11 +104,8 @@ void astrocde_home_state::astrohome_palette(palette_device &palette) const
 	    luminance bits.  UV1 supplies VIDEO, R-Y and B-Y signals to the
 	    television encoder, unlike the arcade hardware's direct RGB output.
 
-	    This home-specific LUT aligns the standard-color references published
-	    in ARCADIAN 1/7 and 1/8 (1979): $29 magenta, $52/$5C red, $7E/$86
-	    yellow, $AC green, $CD/$DD cyan, and $F3 blue.  The AstroBASIC shift
-	    colors reflect console observations: $0F lavender, $5F coral,
-	    $77 gold, and $A7 lime.
+	    Ryland's Eye-One measurements:
+		https://groups.io/g/ballyalley/topic/fix_for_7618_astrocde_and/121154924
 	*/	
 	static constexpr rgb_t colors[32][8] =
 	{
